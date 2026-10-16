@@ -1,0 +1,18 @@
+# ---------------------------------------------------------------------------
+# Enterprise AI Intelligence Platform - backend runtime dependencies
+# ---------------------------------------------------------------------------
+# Ranges are used so `pip install` resolves the newest compatible, maintained
+# release. Pin exact versions in a lock file before production deployment.
+
+# --- Web framework -----------------------------------------------------------
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+python-multipart>=0.0.12        # form/file uploads (used from Phase 3)
+
+# --- Validation / configuration ---------------------------------------------
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+email-validator>=2.2,<3.0       # validated email fields (auth schemas)
+
+# --- Observability -----------------------------------------------------------
+python-json-logger>=2.0,<4.0

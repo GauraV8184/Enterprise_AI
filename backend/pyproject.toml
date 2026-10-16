@@ -1,0 +1,28 @@
+[project]
+name = "enterprise-ai-platform-backend"
+version = "0.1.0"
+description = "Backend for the Enterprise AI Intelligence Platform (FastAPI + LangGraph)."
+requires-python = ">=3.11"
+
+# ---------------------------------------------------------------------------
+# Tooling configuration. Runtime dependencies live in requirements.txt so the
+# Docker build and local setup stay simple; this file configures the tooling.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that require real external services (deselect with '-m \"not integration\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, UP: pyupgrade, C4: comprehensions
+select = ["E", "W", "F", "I", "B", "UP", "C4"]
+ignore = ["E501"]  # line length handled by the formatter

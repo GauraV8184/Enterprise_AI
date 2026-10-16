@@ -1,0 +1,20 @@
+# Normalize line endings across platforms.
+# Text files use LF in the repository; Windows checkouts may use CRLF.
+* text=auto eol=lf
+
+# Windows-only scripts should keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files Git must not attempt to normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.xlsx binary
+*.docx binary
+*.ico binary
+*.woff binary
+*.woff2 binary
