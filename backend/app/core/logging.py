@@ -10,14 +10,16 @@ Every record can carry a ``request_id`` so a single request can be traced
 through all of its log lines. The id lives in a :class:`contextvars.ContextVar`
 so it is correctly isolated per request/task, even under async concurrency.
 
-Never log secrets. ``redact_secrets`` is a small safety net for the most common
-mistake (logging a settings object or an auth header verbatim).
+Never log secrets. The redaction helpers below are a safety net for the most
+common mistake (logging a settings object or an auth header verbatim), not a
+license to log credentials.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -36,28 +38,68 @@ _RESERVED_LOG_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__
     "taskName",
 }
 
-# Substrings that mark a key as sensitive; matching values are redacted.
-_SENSITIVE_HINTS = ("key", "secret", "token", "password", "authorization", "cookie")
+# A key is sensitive when one of its underscore/dash separated words is in this
+# set. Matching whole words (rather than substrings) avoids redacting legitimate
+# fields such as ``total_tokens`` or ``max_tokens`` while still catching
+# ``access_token`` and ``openai_api_key``.
+_SENSITIVE_WORDS = frozenset(
+    {
+        "key",
+        "keys",
+        "secret",
+        "secrets",
+        "password",
+        "passwd",
+        "token",
+        "tokens",
+        "credential",
+        "credentials",
+        "authorization",
+        "cookie",
+        "signature",
+        "private",
+    }
+)
+
+_WORD_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def is_sensitive_key(name: str) -> bool:
+    """True when a field name looks like it holds a secret."""
+    words = [word for word in _WORD_SPLIT.split(str(name).lower()) if word]
+    return any(word in _SENSITIVE_WORDS for word in words)
 
 
 def redact_secrets(value: Any) -> Any:
-    """Recursively redact obviously sensitive values.
-
-    This is a best-effort guard, not a guarantee. The real rule is: do not log
-    secrets in the first place.
-    """
+    """Recursively redact values held under suspicious-looking keys."""
     if isinstance(value, dict):
         return {
-            k: (
-                "***REDACTED***"
-                if any(h in str(k).lower() for h in _SENSITIVE_HINTS)
-                else redact_secrets(v)
-            )
+            k: ("***REDACTED***" if is_sensitive_key(str(k)) else redact_secrets(v))
             for k, v in value.items()
         }
     if isinstance(value, (list, tuple)):
         return [redact_secrets(item) for item in value]
     return value
+
+
+def safe_extra(**fields: Any) -> dict[str, Any]:
+    """Prepare keyword fields for ``logger.*(..., extra=...)``.
+
+    Python's logging raises ``KeyError`` when ``extra`` contains a name that
+    collides with a ``LogRecord`` attribute. Because that happens *inside* the
+    logging call, it can turn an already-handled error into an unhandled crash.
+    This helper renames collisions with a ``ctx_`` prefix (keeping the data
+    rather than dropping it) and redacts anything that looks sensitive.
+
+    Prefer it over a bare dict for every structured log call::
+
+        logger.info("thing_happened", extra=safe_extra(user_id=1, message="hi"))
+    """
+    cleaned: dict[str, Any] = {}
+    for name, value in fields.items():
+        key = f"ctx_{name}" if name in _RESERVED_LOG_ATTRS else name
+        cleaned[key] = value
+    return redact_secrets(cleaned)
 
 
 class JsonFormatter(logging.Formatter):

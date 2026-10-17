@@ -1,0 +1,248 @@
+"""Service layer: turns LangChain's model interface into predictable app behaviour.
+
+Responsibilities:
+
+* build the message list from an API request,
+* normalise the model's response (content shape and token usage vary by
+  provider/version),
+* translate provider exceptions into :class:`AppError` subclasses with sensible
+  HTTP statuses and client-safe messages,
+* run structured-output calls.
+
+Keeping this here means routers stay thin and the error contract is consistent
+everywhere the LLM is used.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any
+
+from langchain_core.exceptions import OutputParserException
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    PermissionDeniedError,
+    RateLimitError,
+)
+
+from app.core.errors import AppError
+from app.core.logging import get_logger, safe_extra
+from app.llm.errors import (
+    LlmAuthenticationError,
+    LlmConnectionError,
+    LlmProviderError,
+    LlmRateLimitError,
+    LlmStructuredOutputError,
+    LlmTimeoutError,
+)
+from app.llm.prompts import DEFAULT_SYSTEM_PROMPT
+from app.llm.schemas import TaskIntent
+
+logger = get_logger(__name__)
+
+_ROLE_TO_MESSAGE = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage}
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """Token accounting, when the provider reports it."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class LlmAnswer:
+    """Normalised result of one chat completion."""
+
+    text: str
+    usage: TokenUsage | None = None
+    finish_reason: str | None = None
+    model_name: str | None = None
+    raw_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def build_messages(
+    history: list[dict[str, str]],
+    system_prompt: str | None = None,
+) -> list[BaseMessage]:
+    """Convert API-style ``[{"role", "content"}]`` dicts into LangChain messages.
+
+    The default system prompt is prepended unless the caller supplies one or the
+    history already begins with a system message.
+    """
+    messages: list[BaseMessage] = []
+
+    has_system = any(item.get("role") == "system" for item in history)
+    if not has_system:
+        messages.append(SystemMessage(content=system_prompt or DEFAULT_SYSTEM_PROMPT))
+
+    for item in history:
+        role = item.get("role", "user")
+        factory = _ROLE_TO_MESSAGE.get(role)
+        if factory is None:
+            raise ValueError(f"Unsupported message role: {role!r}")
+        messages.append(factory(content=item.get("content", "")))
+
+    return messages
+
+
+def _content_to_text(content: Any) -> str:
+    """Flatten message content to plain text.
+
+    Newer LangChain versions may return a list of content blocks
+    (``[{"type": "text", "text": "..."}]``) instead of a plain string.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return "" if content is None else str(content)
+
+
+def _extract_usage(message: BaseMessage) -> TokenUsage | None:
+    """Read token usage from a response, tolerating providers that omit it."""
+    metadata = getattr(message, "usage_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    return TokenUsage(
+        input_tokens=metadata.get("input_tokens"),
+        output_tokens=metadata.get("output_tokens"),
+        total_tokens=metadata.get("total_tokens"),
+    )
+
+
+def map_exception(exc: BaseException) -> AppError:
+    """Translate a provider exception into a client-safe application error.
+
+    Order matters: ``AuthenticationError`` and ``RateLimitError`` are
+    ``APIStatusError`` subclasses, and ``APITimeoutError`` is an
+    ``APIConnectionError`` subclass, so the specific cases must be checked first.
+    """
+    if isinstance(exc, AppError):
+        return exc
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+        return LlmAuthenticationError()
+    if isinstance(exc, RateLimitError):
+        return LlmRateLimitError()
+    if isinstance(exc, (APITimeoutError, asyncio.TimeoutError, TimeoutError)):
+        return LlmTimeoutError()
+    if isinstance(exc, APIConnectionError):
+        return LlmConnectionError()
+    if isinstance(exc, OutputParserException):
+        return LlmStructuredOutputError()
+    if isinstance(exc, APIStatusError):
+        # Record the provider's HTTP status (a number, safe to expose) but never
+        # the response body, which may echo request content.
+        return LlmProviderError(details={"provider_status": exc.status_code})
+    if isinstance(exc, APIError):
+        return LlmProviderError()
+    return LlmProviderError()
+
+
+async def generate_answer(
+    model: BaseChatModel,
+    *,
+    history: list[dict[str, str]],
+    system_prompt: str | None = None,
+    temperature: float | None = None,
+) -> LlmAnswer:
+    """Run a chat completion and return a normalised answer.
+
+    Raises:
+        AppError: any provider failure, translated by :func:`map_exception`.
+    """
+    messages = build_messages(history, system_prompt)
+
+    runnable: Any = model
+    if temperature is not None:
+        # ``bind`` passes the override to the provider without mutating the
+        # shared client instance held on app.state.
+        runnable = model.bind(temperature=temperature)
+
+    try:
+        response = await runnable.ainvoke(messages)
+    except Exception as exc:  # noqa: BLE001 - deliberately translated below
+        mapped = map_exception(exc)
+        logger.warning(
+            "llm_call_failed",
+            extra=safe_extra(
+                error_type=type(exc).__name__,
+                mapped_error=mapped.code,
+                message_count=len(messages),
+            ),
+        )
+        raise mapped from exc
+
+    metadata = getattr(response, "response_metadata", None) or {}
+    return LlmAnswer(
+        text=_content_to_text(response.content).strip(),
+        usage=_extract_usage(response),
+        finish_reason=metadata.get("finish_reason"),
+        model_name=metadata.get("model_name") or metadata.get("model"),
+        raw_metadata={"id": metadata.get("id")} if metadata.get("id") else {},
+    )
+
+
+async def classify_intent(
+    model: BaseChatModel,
+    *,
+    text: str,
+    system_prompt: str | None = None,
+) -> TaskIntent:
+    """Classify a request into a :class:`TaskIntent` using structured output.
+
+    ``with_structured_output`` makes the model emit JSON matching the schema and
+    validates it with Pydantic, so callers receive a typed object rather than
+    text they have to parse.
+
+    Raises:
+        AppError: provider failures, or a schema mismatch
+            (:class:`LlmStructuredOutputError`).
+    """
+    from app.llm.prompts import INTENT_SYSTEM_PROMPT
+
+    messages = build_messages(
+        [{"role": "user", "content": text}],
+        system_prompt or INTENT_SYSTEM_PROMPT,
+    )
+
+    try:
+        structured = model.with_structured_output(TaskIntent)
+        result = await structured.ainvoke(messages)
+    except Exception as exc:  # noqa: BLE001 - deliberately translated below
+        mapped = map_exception(exc)
+        logger.warning(
+            "llm_structured_call_failed",
+            extra=safe_extra(error_type=type(exc).__name__, mapped_error=mapped.code),
+        )
+        raise mapped from exc
+
+    if not isinstance(result, TaskIntent):
+        # Providers using a "tool calling" strategy can return a dict.
+        try:
+            return TaskIntent.model_validate(result)
+        except Exception as exc:  # noqa: BLE001
+            raise LlmStructuredOutputError() from exc
+    return result

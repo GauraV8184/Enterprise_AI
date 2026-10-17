@@ -1,8 +1,9 @@
 """Shared FastAPI dependencies.
 
 Settings are attached to ``app.state.settings`` in ``create_app`` and read back
-here. This keeps a single source of truth per app instance and lets tests build
-apps with their own settings without touching global state.
+here. The chat model is built once during startup and stored on
+``app.state.chat_model``; tests replace it via ``app.dependency_overrides`` or by
+setting the attribute directly, so the suite never touches the network.
 """
 
 from __future__ import annotations
@@ -10,8 +11,10 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, Request
+from langchain_core.language_models import BaseChatModel
 
 from app.core.config import Settings
+from app.llm.errors import LlmNotConfiguredError
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -19,6 +22,15 @@ def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-# Reusable annotated dependency. Using ``Annotated`` (the FastAPI-recommended
+def get_chat_model(request: Request) -> BaseChatModel:
+    """Return the app's chat model, or fail clearly if none is configured."""
+    model = getattr(request.app.state, "chat_model", None)
+    if model is None:
+        raise LlmNotConfiguredError()
+    return model
+
+
+# Reusable annotated dependencies. Using ``Annotated`` (the FastAPI-recommended
 # style) keeps ``Depends`` out of function defaults, which satisfies lint rules.
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+ChatModelDep = Annotated[BaseChatModel, Depends(get_chat_model)]
