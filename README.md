@@ -157,6 +157,30 @@ cd backend
 This makes a real chat call and a real structured-output call and prints the
 result. A green result means the API will work. It never prints the key.
 
+### Checking that Ollama is running
+
+Ollama runs as a background app on Windows (tray icon) and starts on login by
+default. Four checks, fastest first:
+
+```powershell
+ollama list                                    # 1. CLI answers with a model table
+curl.exe -s http://127.0.0.1:11434/api/tags    # 2. API returns JSON
+Get-NetTCPConnection -LocalPort 11434 -State Listen   # 3. port is open
+.\.venv\Scripts\python.exe scripts\check_llm.py       # 4. app config + real call
+```
+
+Check 4 is the definitive one: it uses your actual `.env` and makes a real
+request, so it also catches a wrong `OPENAI_MODEL` or a typo in
+`OPENAI_BASE_URL` that the port check would miss.
+
+To start it, launch **Ollama** from the Start menu or run `ollama serve`. If it
+is already running, `ollama serve` prints `bind: address already in use`, which
+confirms it is up rather than indicating a problem.
+
+When Ollama is unreachable the API returns `502 llm_connection_failed` with a
+message naming the configured base URL. `GET /api/chat/status` reports
+configuration state without sending a message.
+
 ### Troubleshooting
 
 | Symptom | Cause and fix |
