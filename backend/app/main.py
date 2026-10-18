@@ -21,8 +21,9 @@ from app.api.error_handlers import register_error_handlers
 from app.api.router import api_router
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, request_id_ctx, safe_extra, setup_logging
+from app.database.repositories import DocumentRepository
 from app.llm.errors import LlmNotConfiguredError
-from app.llm.factory import build_chat_model
+from app.llm.factory import build_chat_model, build_embeddings
 
 logger = get_logger(__name__)
 
@@ -95,10 +96,34 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             ),
         )
 
+    # The document store is created even without an LLM: listing and deleting
+    # already-uploaded documents must keep working while a provider is down.
+    app.state.repository = DocumentRepository(settings.database_path)
+
+    if settings.embeddings_configured:
+        try:
+            app.state.embeddings = build_embeddings(settings)
+        except LlmNotConfiguredError as exc:
+            app.state.embeddings = None
+            logger.warning(
+                "embeddings_not_configured",
+                extra=safe_extra(provider=settings.embedding_provider, reason=exc.message),
+            )
+    else:
+        app.state.embeddings = None
+        logger.warning(
+            "embeddings_not_configured",
+            extra=safe_extra(
+                provider=settings.embedding_provider,
+                hint="Set EMBEDDING_PROVIDER/EMBEDDING_MODEL in .env",
+            ),
+        )
+
     yield
-    # Nothing to tear down yet; database/vector-store clients are released here
-    # once Phases 3-4 introduce them.
+    # Connections here are opened per operation, so there is nothing to drain. The
+    # references are dropped so nothing outlives the application instance.
     app.state.chat_model = None
+    app.state.embeddings = None
 
 
 def _register_request_context(app: FastAPI) -> None:

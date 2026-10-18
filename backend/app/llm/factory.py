@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 
 from app.core.config import Settings
@@ -104,3 +105,71 @@ def _build_openai_compatible(
         ),
     )
     return ChatOpenAI(**kwargs)
+
+
+def build_embeddings(settings: Settings) -> Embeddings:
+    """Build the embedding model from validated settings.
+
+    Embeddings are configured separately from the chat model, so you can run a
+    local embedding model alongside a hosted chat model (or vice versa).
+
+    Raises:
+        LlmNotConfiguredError: the selected embedding provider has no credentials.
+    """
+    if settings.embedding_provider == "ollama":
+        return _build_openai_compatible_embeddings(
+            settings,
+            base_url=settings.effective_embedding_base_url,
+            api_key=settings.effective_embedding_api_key,
+        )
+    if settings.embedding_provider == "openai":
+        if settings.openai_api_key is None:
+            raise LlmNotConfiguredError(
+                "Embeddings are set to the openai provider but OPENAI_API_KEY is empty. "
+                "Set a key, or use EMBEDDING_PROVIDER=ollama."
+            )
+        return _build_openai_compatible_embeddings(
+            settings,
+            base_url=settings.effective_embedding_base_url,
+            api_key=settings.effective_embedding_api_key,
+        )
+
+    raise LlmNotConfiguredError(f"Unsupported embedding provider: {settings.embedding_provider!r}")
+
+
+def _build_openai_compatible_embeddings(
+    settings: Settings,
+    *,
+    base_url: str | None,
+    api_key: str | None,
+) -> Embeddings:
+    """Construct the OpenAI-compatible embedding client.
+
+    Note the field is ``model`` here (not ``model_name`` as on ChatOpenAI) and
+    the endpoint is still ``openai_api_base``. Verified against
+    langchain-openai 1.7.2.
+    """
+    from langchain_openai import OpenAIEmbeddings
+
+    kwargs: dict[str, Any] = {
+        "model": settings.embedding_model,
+        "openai_api_key": api_key,
+        "request_timeout": settings.embedding_timeout_seconds,
+        "chunk_size": settings.embedding_batch_size,
+        # Local servers do not implement the tokeniser-based length check, and
+        # it would reject non-OpenAI models.
+        "check_embedding_ctx_length": False,
+    }
+    if base_url:
+        kwargs["openai_api_base"] = base_url
+
+    logger.info(
+        "embeddings_client_built",
+        extra=safe_extra(
+            provider=settings.embedding_provider,
+            model=settings.embedding_model,
+            base_url=base_url or "(provider default: api.openai.com)",
+            batch_size=settings.embedding_batch_size,
+        ),
+    )
+    return OpenAIEmbeddings(**kwargs)

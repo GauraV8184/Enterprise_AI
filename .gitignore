@@ -45,6 +45,10 @@ pnpm-debug.log*
 # ---------------------------------------------------------------------------
 data/uploads/
 data/generated/
+# Development document store (SQLite + write-ahead log)
+data/*.db
+data/*.db-wal
+data/*.db-shm
 *.log
 logs/
 

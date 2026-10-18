@@ -28,6 +28,20 @@ app/
   core/
     config.py    Typed, validated settings (single source of truth).
     logging.py   JSON logging + per-request correlation id.
+    errors.py    AppError base: stable code + client-safe message.
+  llm/
+    factory.py   Provider -> chat model AND embedding model.
+    service.py   Calls + response/error normalisation.
+  rag/
+    loaders.py   Per-format text extraction with provenance.
+    chunking.py  Splitting that preserves page and section.
+    ingest.py    Parse -> chunk -> embed -> store.
+    retriever.py Similarity search + grounded answering.
+  database/
+    repositories.py  Owner-scoped documents and vectors.
+  security/
+    file_validation.py  Extension, size and magic-byte checks.
+    identity.py         Who is asking (development stub until Phase 4).
   api/
     deps.py      Shared dependencies.
     health.py    GET / and GET /health.
@@ -35,10 +49,9 @@ app/
   schemas/       Pydantic models describing request/response shapes.
 ```
 
-Feature packages (`agents/`, `graph/`, `rag/`, `tools/`, `security/`,
-`database/`) are created only in the phase that implements them. We deliberately
-avoid shipping empty folders for every imagined feature — empty scaffolding
-looks complete but tests nothing.
+Feature packages (`agents/`, `graph/`, `tools/`) are created only in the phase
+that implements them. We deliberately avoid shipping empty folders for every
+imagined feature — empty scaffolding looks complete but tests nothing.
 
 ## 3. Request lifecycle
 
@@ -110,9 +123,13 @@ recommendation.
 
 ## 7. What is intentionally NOT here yet
 
-- No LLM calls, embeddings, or agents — Phase 2+.
-- No database — Phase 4.
-- No authentication — Phase 4 (Supabase Auth).
+- No agents, tools, or LangGraph workflow — Phases 5–6.
+- No hosted database; Phase 3 uses a local SQLite store so the pipeline is
+  runnable and testable with no external account. Supabase + pgvector is Phase 4.
+- No authentication — Phase 4 (Supabase Auth). Ownership is enforced now, but the
+  identity that drives it is not yet verified.
+- No OCR for scanned PDFs — they fail with a clear error instead.
+- No background worker; indexing runs inline in the request.
 - No rate limiting — Phase 7.
 
 Anything not implemented is marked as such in the README roadmap rather than
@@ -228,8 +245,30 @@ Established now:
 - Permissions are enforced outside the LLM (this becomes essential in Phases
   6–7 when tools are added).
 
-Not yet established: authentication/authorization, RLS, SQL validation, file
-validation, rate limiting, audit logging (Phases 4–7).
+Added in Phase 3:
+- Uploads are validated three ways: extension allowlist, size cap, and
+  magic-byte/structure sniffing. A `.pdf` that is not a PDF is rejected.
+- The client filename **never** reaches the filesystem. Storage paths are
+  server-generated UUIDs, so path traversal is removed as a category instead of
+  filtered for. The filename is only a display string, with path components and
+  control characters stripped.
+- Every storage query is filtered by owner id **in SQL**. Tenancy is not a
+  post-processing step that a new code path can forget.
+- Cross-tenant access returns 404, not 403, so ids do not confirm existence.
+- Third-party parser errors are sanitised: library messages embed the storage
+  path they were given, so paths are replaced with the display filename before
+  the text reaches a response or a stored status.
+
+Not yet established: real authentication/authorization, RLS, SQL validation,
+rate limiting, audit logging (Phases 4–7).
+
+**The honest caveat on identity.** Phase 3 has no authentication. The acting user
+comes from an `X-User-Id` header, which anyone can set — it is *not* a security
+control. What it does buy is that the enforcement points are already correct and
+already tested: Phase 4 replaces *how the identity is derived* and nothing else
+moves. In `ENVIRONMENT=production` the module refuses to produce an identity at
+all, so an accidentally exposed deployment fails closed rather than serving one
+tenant's documents to another.
 
 ## 12. Testing approach
 
@@ -243,3 +282,105 @@ validation, rate limiting, audit logging (Phases 4–7).
 - Verified APIs against the installed versions rather than assuming:
   `langchain-openai` 1.7.2 uses `model_name` / `openai_api_base` /
   `request_timeout`, not `model` / `base_url` / `timeout`.
+
+Phase 3 additions:
+
+- **Sample documents are generated, not committed.** Tests build real PDFs with
+  `pymupdf`, real DOCX with `python-docx`, and real XLSX with pandas. A binary
+  fixture is unreviewable in a pull request, and generating the file proves the
+  parser handles genuine library output rather than a byte string that happens
+  to parse.
+- **The fake embedding is a real `Embeddings` implementation.** `HashingEmbeddings`
+  hashes tokens into a 1024-dimension vector, so cosine similarity genuinely
+  tracks shared vocabulary and ranking assertions mean something. Its own
+  properties are tested, because if the double stopped being faithful every
+  ranking test would keep passing while measuring nothing.
+- **`test_search_returns_the_other_document_for_a_different_query` initially
+  failed, and the failure was informative.** Two documents with the same words
+  score identically, so the winner was decided by tie-break order rather than by
+  similarity — the test was measuring nothing. Sample texts were made
+  deliberately disjoint. The same investigation showed the first version of the
+  fake embedding had too few dimensions: hash collisions let an unrelated
+  document outscore a related one.
+- The suite is run repeatedly (~6×) after ranking changes, because a
+  nondeterministic ordering bug passes most of the time.
+
+## 13. The document pipeline (Phase 3)
+
+```
+  upload ─► validate ─► parse ─► chunk ─► embed ─► store ─► (status: ready)
+             │            │        │        │        │
+        extension,    per-type   page +   batched   one
+        size, magic   parser     section   call     transaction
+        bytes                    kept
+```
+
+### Parsing is provenance-first
+
+Every parser returns `TextBlock`s carrying a page number (where the format has
+pages) and a section heading. Chunking splits *per block*, so a chunk never spans
+two pages and its citation is exact. Splitting the whole document as one string
+would produce better-boundary chunks and approximate citations — the wrong
+trade for a system whose value is verifiable sourcing.
+
+Two format-specific decisions:
+
+- **DOCX tables are extracted in document order.** `document.paragraphs` and
+  `document.tables` are separate collections; reading them separately silently
+  moves every table to the end. The XML body is walked instead.
+- **CSV/XLSX blocks repeat the header row.** A chunk describing row 4,000 would
+  otherwise be a list of values with no column names, matching almost nothing.
+- **Nested headings keep their ancestry** (`Operations Guide > Incident
+  response`), because "Overview" alone is ambiguous and two documents can both
+  have one.
+
+### The store
+
+Development uses SQLite with vectors as raw float32 blobs and NumPy cosine
+similarity. This is honest but limited: similarity is a linear scan, so cost
+grows with total chunks. It is fine for thousands, not millions — pgvector exists
+to move that work into an index, and the repository methods define exactly the
+contract Phase 4 implements.
+
+Two deliberate choices:
+
+- **Connections are opened per operation.** FastAPI runs `def` endpoints in a
+  worker thread, and SQLite connections are thread-bound. Short-lived connections
+  remove that hazard entirely.
+- **Deletion removes chunks explicitly** rather than relying on
+  `ON DELETE CASCADE`. `PRAGMA foreign_keys` is connection-scoped; if it were
+  ever off, a cascade would silently leave orphaned vectors that keep surfacing
+  in search results.
+
+### Why upload is synchronous
+
+Indexing runs inline, so a `201` means "already searchable". Large files therefore
+mean slow requests. A background worker is the natural next step, and it needs no
+API change because `status` (`pending → processing → ready|failed`) already models
+the transition.
+
+A document that fails to index is **kept** with `status="failed"` and the reason,
+and its id travels with the error response. A silent disappearance is worse than a
+visible error, and partial vectors are deleted so a half-indexed document cannot
+answer from an incomplete corpus.
+
+### Grounded answering refuses to guess
+
+When retrieval returns nothing, **the chat model is not called**. The response has
+`grounded: false` and states that no relevant content exists. Asking a model to
+answer from an empty context is an invitation to hallucinate, and the honest
+answer is already known.
+
+Citations and context are built together: `format_context` returns the text *and*
+the matches that fit inside the character budget, so the model is never shown a
+label the response omits, and never cites something the client cannot resolve.
+`POST /api/documents/search` exposes retrieval on its own — when an answer is
+wrong, the first question is always "were the right chunks retrieved?".
+
+### Changing the embedding model
+
+Stored vectors and query vectors must come from the same model. If
+`EMBEDDING_MODEL` changes, the API returns `409 embedding_dimension_mismatch`
+naming both dimensions instead of comparing 768-dimensional vectors with
+1536-dimensional ones. That comparison is meaningless, and a silently wrong
+search result is worse than a clear error.

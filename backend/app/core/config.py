@@ -98,6 +98,36 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
 
+    # --- Embeddings (Phase 3) ------------------------------------------------
+    # Embeddings are separate from the chat model because a provider may be good
+    # at one and not the other. Defaults to a local Ollama model, which costs
+    # nothing and keeps documents on the machine.
+    embedding_provider: Literal["ollama", "openai"] = "ollama"
+    embedding_model: str = "nomic-embed-text"
+    embedding_batch_size: int = 64
+    embedding_timeout_seconds: float = 120.0
+    # Overrides the LLM endpoint/key when set. Left unset, the embedding client
+    # follows embedding_provider's defaults.
+    embedding_base_url: str | None = None
+
+    # --- Document storage (Phase 3) ------------------------------------------
+    # Local SQLite for development. Phase 4 adds Supabase/Postgres; the storage
+    # contract is documented in app/database/repositories.py.
+    data_dir: Path = Field(default_factory=lambda: _REPO_ROOT / "data")
+    max_upload_mb: int = 25
+
+    # --- Retrieval (Phase 3) -------------------------------------------------
+    chunk_size: int = 1000
+    chunk_overlap: int = 150
+    retrieval_top_k: int = 6
+    max_context_chars: int = 12000
+
+    # --- Development identity ------------------------------------------------
+    # Phase 3 has no authentication yet (Supabase Auth arrives in Phase 4).
+    # Requests may name a user via the X-User-Id header for local multi-user
+    # testing; without it this id is used. Refused outright in production.
+    dev_user_id: str = "dev-user"
+
     # --- Validators ----------------------------------------------------------
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -192,6 +222,46 @@ class Settings(BaseSettings):
         if self.llm_provider == "ollama":
             return "ollama"
         return None
+
+    @property
+    def effective_embedding_base_url(self) -> str | None:
+        """Endpoint for embedding requests."""
+        if self.embedding_base_url:
+            return self.embedding_base_url
+        if self.embedding_provider == "ollama":
+            return OLLAMA_DEFAULT_BASE_URL
+        return None
+
+    @property
+    def effective_embedding_api_key(self) -> str | None:
+        """Credential for embedding requests (placeholder for local servers)."""
+        if self.openai_api_key is not None:
+            return self.openai_api_key.get_secret_value()
+        if self.embedding_provider == "ollama":
+            return "ollama"
+        return None
+
+    @property
+    def embeddings_configured(self) -> bool:
+        if self.embedding_provider == "ollama":
+            return True
+        if self.embedding_provider == "openai":
+            return self.openai_api_key is not None
+        return False
+
+    @property
+    def uploads_dir(self) -> Path:
+        """Where uploaded originals are written."""
+        return self.data_dir / "uploads"
+
+    @property
+    def database_path(self) -> Path:
+        """SQLite file used by the development document store."""
+        return self.data_dir / "app.db"
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
 
 
 @lru_cache

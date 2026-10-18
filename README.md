@@ -52,27 +52,42 @@ Enterprize_AI/
 │   │   │   ├── logging.py          # JSON logging, request id, redaction
 │   │   │   └── errors.py           # AppError base (status + safe message)
 │   │   ├── llm/
-│   │   │   ├── factory.py          # provider -> chat model
-│   │   │   ├── prompts.py          # system prompts (no-fabrication rules)
+│   │   │   ├── factory.py          # provider -> chat model AND embeddings
+│   │   │   ├── prompts.py          # system prompts (no-fabrication, RAG rules)
 │   │   │   ├── schemas.py          # structured-output models (TaskIntent)
 │   │   │   ├── service.py          # calls + response/error normalisation
 │   │   │   └── errors.py           # LLM error types
+│   │   ├── rag/
+│   │   │   ├── loaders.py          # PDF/DOCX/XLSX/CSV/MD/TXT extraction
+│   │   │   ├── chunking.py         # splitting that preserves page + section
+│   │   │   ├── ingest.py           # parse -> chunk -> embed -> store pipeline
+│   │   │   └── retriever.py        # similarity search + grounded answering
+│   │   ├── database/
+│   │   │   └── repositories.py     # owner-scoped documents + vectors
+│   │   ├── security/
+│   │   │   ├── file_validation.py  # extension, size and magic-byte checks
+│   │   │   ├── identity.py         # who is asking (dev stub until Phase 4)
+│   │   │   └── errors.py           # auth error types
 │   │   ├── api/
 │   │   │   ├── deps.py             # shared dependencies
 │   │   │   ├── health.py           # / and /health
 │   │   │   ├── chat.py             # /chat, /chat/intent, /chat/status
+│   │   │   ├── documents.py        # upload, list, delete, search, ask
 │   │   │   ├── error_handlers.py   # AppError -> JSON
 │   │   │   └── router.py
 │   │   └── schemas/
 │   │       ├── health.py
-│   │       └── chat.py
-│   ├── scripts/check_llm.py        # live diagnostic for the LLM setup
-│   ├── tests/                      # 67 unit tests + opt-in live tests
+│   │       ├── chat.py
+│   │       └── documents.py
+│   ├── scripts/
+│   │   ├── check_llm.py            # live diagnostic for the LLM setup
+│   │   └── check_rag.py            # live diagnostic for the document pipeline
+│   ├── tests/                      # 226 offline tests + 5 opt-in live tests
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   └── pyproject.toml
 ├── docs/architecture.md
-├── data/
+├── data/                           # git-ignored: uploads + SQLite store
 ├── .env.example
 └── README.md
 ```
@@ -129,11 +144,13 @@ separately as `402 llm_quota_exhausted` because retrying cannot fix it.
 ### Option B — local Ollama (free, no account)
 
 1. Install and start [Ollama](https://ollama.com).
-2. Pull a model. Choose one with tool-calling support, because the Phase 5–6
-   agents need to select tools and emit structured JSON:
+2. Pull two models. The chat model needs tool-calling support, because the
+   Phase 5–6 agents must select tools and emit structured JSON. The embedding
+   model powers document search in Phase 3:
 
    ```powershell
-   ollama pull llama3.1:8b
+   ollama pull llama3.1:8b        # chat + tool calling (~4.9 GB)
+   ollama pull nomic-embed-text   # embeddings for document search (~274 MB)
    ```
 
 3. Set these in the root `.env`:
@@ -141,12 +158,15 @@ separately as `402 llm_quota_exhausted` because retrying cannot fix it.
    ```
    LLM_PROVIDER=ollama
    OPENAI_MODEL=llama3.1:8b
+   EMBEDDING_PROVIDER=ollama
+   EMBEDDING_MODEL=nomic-embed-text
    ```
 
 That is all — `/api/chat/status` will report `"configured": true`. There is **no
 API key**: a local server does not need one, and the `ollama` provider does not
 ask for one. If your server is not on localhost, add
-`OPENAI_BASE_URL=http://<host>:11434/v1`.
+`OPENAI_BASE_URL=http://<host>:11434/v1` (and `EMBEDDING_BASE_URL` if the
+embedding server differs).
 
 Use `LLM_PROVIDER=openai` (plus `OPENAI_BASE_URL` and a key) only when you are
 talking to a hosted OpenAI-compatible *service* that requires credentials.
@@ -155,11 +175,14 @@ talking to a hosted OpenAI-compatible *service* that requires credentials.
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe scripts\check_llm.py
+.\.venv\Scripts\python.exe scripts\check_llm.py   # chat model answers
+.\.venv\Scripts\python.exe scripts\check_rag.py   # upload -> search -> cited answer
 ```
 
-This makes a real chat call and a real structured-output call and prints the
-result. A green result means the API will work. It never prints the key.
+`check_llm.py` makes a real chat call and a real structured-output call.
+`check_rag.py` runs the whole document pipeline against a throwaway database, so
+it never touches your `data/` folder. Both print a clear verdict and never print
+a key.
 
 ### Checking that Ollama is running
 
@@ -197,6 +220,13 @@ configuration state without sending a message.
 | `429 llm_rate_limited` | Genuine throttling. Wait and retry. |
 | Model errors after `ollama pull` | Confirm the `.env` model name matches `ollama list` exactly, including the tag (`llama3.1:8b`, not `llama3.1`). |
 | First response is very slow | A local 8B model on CPU loads into memory on first use. Later responses are faster. |
+| `502` on upload with `llm_connection_failed` | Embeddings use the same server. Pull the model: `ollama pull nomic-embed-text`. |
+| `503 embeddings not configured` | `EMBEDDING_PROVIDER` needs a key for `openai`, or `ollama` for a local server. |
+| Upload returns `422 no_extractable_text` | The PDF has no text layer (it is a scan). OCR is not implemented. |
+| `409 embedding_dimension_mismatch` | `EMBEDDING_MODEL` changed after documents were indexed. Re-upload them, or restore the old model. |
+| Search finds nothing at all | Check `searched_chunks` in the response. `0` means nothing is indexed — the upload may have failed. |
+| Search finds the wrong passages | Run `POST /api/documents/search` on its own. If retrieval is wrong, the answer will be too — that is a chunking/embedding issue, not a prompting one. |
+| Answers ignore the documents | Use `scripts/check_rag.py`. It verifies the figure in the answer came from the file. |
 
 ### Choosing a model
 
@@ -226,6 +256,12 @@ From the `backend` directory:
 | `GET /api/chat/status` | is the LLM configured? (never leaks the key) |
 | `POST /api/chat` | send a conversation, get a reply |
 | `POST /api/chat/intent` | classify a request (structured output) |
+| `POST /api/documents` | upload a file, extract, chunk, embed and index it |
+| `GET /api/documents` | list your documents and their processing status |
+| `GET /api/documents/{id}` | one document's metadata and status |
+| `DELETE /api/documents/{id}` | delete a document, its vectors and the stored file |
+| `POST /api/documents/search` | semantic search over your own documents |
+| `POST /api/documents/ask` | answer a question from your documents, with citations |
 | `GET /docs` | interactive Swagger UI |
 
 Example:
@@ -257,27 +293,112 @@ LangGraph supervisor consumes in Phase 5:
 
 ---
 
+## Document intelligence (Phase 3)
+
+Upload documents and ask questions about them. Answers are generated **only** from
+retrieved passages, and every answer carries citations back to a file and page.
+
+### Supported file types
+
+| Type | Extensions | What is extracted |
+|---|---|---|
+| PDF | `.pdf` | Text per page, with page numbers preserved for citations |
+| Word | `.docx` | Paragraphs and tables, in document order, with heading sections |
+| Excel | `.xlsx` | Every sheet, header row repeated in each block |
+| CSV | `.csv` | Header-prefixed row groups (comma, semicolon and tab detected) |
+| Text | `.txt` | Whole file |
+| Markdown | `.md`, `.markdown` | Prose, with nested heading sections |
+
+Scanned PDFs have no text layer and **OCR is not implemented**. They fail with
+`422 no_extractable_text` rather than indexing as an empty document.
+
+### Try it
+
+```powershell
+# Upload (201 means already searchable)
+curl.exe -s -X POST http://127.0.0.1:8000/api/documents `
+  -F "file=@C:\path\to\handbook.pdf"
+
+# Retrieval only - no model involved. Use this when an answer looks wrong.
+curl.exe -s -X POST http://127.0.0.1:8000/api/documents/search `
+  -H "Content-Type: application/json" `
+  -d '{\"query\":\"how much annual leave do employees get?\",\"top_k\":3}'
+
+# Grounded answer with citations
+curl.exe -s -X POST http://127.0.0.1:8000/api/documents/ask `
+  -H "Content-Type: application/json" `
+  -d '{\"question\":\"how much annual leave do employees get?\"}'
+```
+
+An `/ask` response looks like this:
+
+```json
+{
+  "answer": "According to [1], a full-time employee accrues twenty days of paid annual leave per calendar year.",
+  "grounded": true,
+  "sources": [
+    {
+      "label": 1,
+      "filename": "handbook.pdf",
+      "page": 1,
+      "score": 0.8868,
+      "snippet": "Every full-time employee accrues twenty days of paid annual leave..."
+    }
+  ],
+  "searched_chunks": 4
+}
+```
+
+`grounded: false` means nothing relevant was found. In that case **the model is not
+called at all** — the response explains that no matching content exists, because
+asking a model to answer from an empty context is how hallucinations start.
+
+### Who owns what
+
+Phase 3 has no authentication yet (Supabase Auth lands in Phase 4). Every request
+resolves an owner, and **all storage queries filter on it in SQL**, so documents and
+vectors are tenant-scoped from the start. Two things to be clear about:
+
+- `X-User-Id: <id>` names the caller for local multi-user testing. **This is not a
+  security control** — anyone can send that header.
+- With `ENVIRONMENT=production` the document endpoints refuse to serve at all. They
+  fail closed rather than trusting an unverified header.
+
+Cross-user access returns **404, not 403**, so an id never confirms that someone
+else's document exists.
+
+### Where the data lives
+
+Development uses SQLite at `data/app.db` with vectors stored as raw float32, and
+uploads under `data/uploads/`. Similarity search is a linear scan in NumPy: correct,
+and fine for thousands of chunks, but it is not an index. Phase 4 replaces this with
+Supabase Postgres + pgvector behind the same methods.
+
+---
+
 ## Run the tests and checks
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 73 passed, 2 skipped
+.\.venv\Scripts\python.exe -m pytest          # 226 passed, 5 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
 
-The 2 skipped tests are **live** LLM tests (they need a running provider).
-They are opt-in:
+The 5 skipped tests are **live** tests that need a running provider. They are opt-in:
 
 ```powershell
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
 
-With a provider running the whole suite is green: **75 passed**, including two
-real model calls.
+With a provider running the whole suite is green: **231 passed**, including real
+chat calls, real embeddings, and a full upload → retrieve → cite cycle.
 
-The default suite never touches the network: it runs the real application code
-against an in-process fake chat model.
+The default suite never touches the network. It runs the real application code —
+real parsers, real SQLite store, real ranking — against an in-process fake chat
+model and a deterministic fake embedding model. Sample PDF, DOCX, XLSX and CSV
+files are *generated* by the tests rather than committed as binaries, so the
+parsers are exercised against genuine library output.
 
 ---
 
@@ -311,11 +432,27 @@ Every expected failure has a stable `code` and an actionable message:
 | `llm_connection_failed` | 502 | network/base-URL problem |
 | `llm_provider_error` | 502 | any other provider error |
 | `llm_structured_output_failed` | 502 | response did not match the schema |
+| `unsupported_file_type` | 415 | extension is not in the allowlist |
+| `file_too_large` | 413 | exceeds `MAX_UPLOAD_MB` |
+| `invalid_file` | 400 | empty, or the bytes do not match the extension |
+| `document_parse_failed` | 422 | the file is the right type but could not be read |
+| `no_extractable_text` | 422 | read cleanly but had no text (e.g. a scanned PDF) |
+| `document_not_found` | 404 | no such document, or it belongs to another user |
+| `embedding_dimension_mismatch` | 409 | `EMBEDDING_MODEL` changed after indexing — re-upload |
+| `not_authenticated` | 401 | an explicitly empty `X-User-Id` header |
+| `authentication_not_configured` | 503 | document endpoints used in `ENVIRONMENT=production` |
 
-Note that providers report *exhausted credits* and *throttling* with the same
-HTTP status (429). They need opposite responses, so the platform inspects the
-provider's error code and returns `402` for an empty balance. Retrying an empty
-balance can never succeed, and telling you to retry would be bad advice.
+Notes on the less obvious ones:
+
+- Providers report *exhausted credits* and *throttling* with the same HTTP status
+  (429). They need opposite responses, so the platform inspects the provider's
+  error code and returns `402` for an empty balance. Retrying an empty balance can
+  never succeed, and telling you to retry would be bad advice.
+- `document_not_found` is deliberately also the answer for someone else's
+  document. A `403` would confirm that the id exists.
+- `embedding_dimension_mismatch` fails rather than comparing 768-dimensional
+  stored vectors against, say, 1536-dimensional queries. That comparison is
+  meaningless, and a silently wrong search result is worse than a clear error.
 
 Responses include `request_id`, which also appears in the logs and in the
 `X-Request-ID` header — so a user-visible error can be traced to a log line.
@@ -346,7 +483,7 @@ Responses include `request_id`, which also appears in the logs and in the
 |---|---|---|
 | 1 | Foundation: FastAPI, config, logging, tests, docs | ✅ done |
 | 2 | LLM integration: chat, structured output, error handling | ✅ done |
-| 3 | RAG: upload, parse, chunk, embed, retrieve | ⬜ |
+| 3 | RAG: upload, parse, chunk, embed, retrieve | ✅ done |
 | 4 | Supabase: schema, Auth, Storage, RLS, persistence | ⬜ |
 | 5 | LangGraph workflow + state | ⬜ |
 | 6 | Tools & specialist agents + report generation | ⬜ |

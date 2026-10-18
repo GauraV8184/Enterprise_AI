@@ -11,10 +11,12 @@ with that library to keep the fakes faithful to what production sees.
 
 from __future__ import annotations
 
+import zlib
 from typing import Any
 
 import httpx2
 import openai
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -87,9 +89,55 @@ class FakeChatModel(BaseChatModel):
 
 
 # --------------------------------------------------------------------------
-# Provider exception builders (mirror what the openai SDK raises in production)
+# Fake embeddings
 # --------------------------------------------------------------------------
 
+
+class HashingEmbeddings(Embeddings):
+    """A real ``Embeddings`` implementation with no model behind it.
+
+    Each token is hashed into one of ``dimensions`` buckets and the result is
+    L2-normalised, so cosine similarity is dominated by **shared vocabulary**. That
+    lets retrieval tests assert real ranking behaviour ("the passage about revenue
+    ranks above the passage about laptops") rather than just checking a list came
+    back.
+
+    ``dimensions`` is large because collisions are the failure mode: with a small
+    vector, unrelated documents share buckets by accident and can outscore a
+    genuinely related one. At 1024 buckets a stray collision contributes roughly
+    0.07 cosine, well below the ~0.25 from three genuinely shared terms.
+
+    ``zlib.crc32`` is used rather than the builtin ``hash()`` because string hashing
+    is salted per process - a test that passed in one run could fail in the next,
+    and stored vectors would not be reproducible.
+    """
+
+    dimensions: int = 1024
+
+    def _vector(self, text: str) -> list[float]:
+        vector = [0.0] * self.dimensions
+        for token in text.lower().split():
+            bucket = zlib.crc32(token.encode("utf-8")) % self.dimensions
+            vector[bucket] += 1.0
+
+        norm = sum(value * value for value in vector) ** 0.5
+        if norm == 0.0:
+            # An empty string would otherwise be an all-zero vector, which has no
+            # direction and cannot be compared with anything.
+            vector[0] = 1.0
+            return vector
+        return [value / norm for value in vector]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._vector(text)
+
+
+# --------------------------------------------------------------------------
+# Provider exception builders (mirror what the openai SDK raises in production)
+# --------------------------------------------------------------------------
 _API_URL = "https://api.openai.com/v1/chat/completions"
 
 
