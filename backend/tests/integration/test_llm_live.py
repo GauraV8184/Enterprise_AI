@@ -33,12 +33,18 @@ skip_reason = (
 def live_settings() -> Settings:
     settings = Settings()
     if not settings.llm_configured:
-        pytest.skip("OPENAI_API_KEY is not configured in .env")
+        pytest.skip("The LLM provider is not configured in the repo-root .env")
     return settings
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def live_model(live_settings: Settings):
+    """Build a client for this test.
+
+    Note: langchain-openai keeps a module-global shared async HTTP client, so
+    the client is shared regardless. The session-scoped event loop configured in
+    pyproject.toml is what makes that safe across tests.
+    """
     try:
         return build_chat_model(live_settings)
     except LlmNotConfiguredError:  # pragma: no cover - defensive

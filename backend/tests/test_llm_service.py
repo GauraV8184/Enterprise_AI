@@ -209,6 +209,32 @@ def test_unknown_exception_becomes_provider_error() -> None:
     assert isinstance(map_exception(RuntimeError("boom")), LlmProviderError)
 
 
+def test_wrapped_provider_error_is_recovered_from_cause_chain() -> None:
+    """A wrapper hiding the real provider error must not hide the diagnosis.
+
+    Reproduces the real failure: LangChain's streaming accumulator replaces a
+    failed request with "v2 stream finished without producing a message".
+    """
+    wrapper = RuntimeError("v2 stream finished without producing a message")
+    wrapper.__cause__ = make_timeout_error()
+    assert isinstance(map_exception(wrapper), LlmTimeoutError)
+
+
+def test_wrapped_auth_error_is_recovered_from_context_chain() -> None:
+    """__context__ works too, not just __cause__."""
+    wrapper = RuntimeError("outer")
+    wrapper.__context__ = make_authentication_error()
+    assert isinstance(map_exception(wrapper), LlmAuthenticationError)
+
+
+def test_cause_chain_does_not_loop_forever_on_cycles() -> None:
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+    assert isinstance(map_exception(first), LlmProviderError)
+
+
 # --------------------------------------------------------------------------
 # classify_intent (structured output)
 # --------------------------------------------------------------------------

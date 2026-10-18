@@ -6,9 +6,10 @@ it retrieves internal documents (RAG), queries authorized business data safely
 reports — all coordinated by a LangGraph workflow behind a FastAPI backend and
 a React frontend.
 
-> **Status: Phase 2 of 9 complete.** The foundation and the LLM integration are
-> working and tested. Later phases add RAG, Supabase, LangGraph agents, tools,
-> security, and the React UI. See [Roadmap](#roadmap) for exactly what exists.
+> **Status: Phase 2 of 9 complete, verified against a live model.** The
+> foundation and the LLM integration work end to end (validated with a local
+> Ollama `llama3.1:8b`). Later phases add RAG, Supabase, LangGraph agents,
+> tools, security, and the React UI. See [Roadmap](#roadmap).
 
 ---
 
@@ -110,35 +111,74 @@ launch from.
 
 ## LLM setup
 
-1. Put a key in the root `.env`:
+The app works with a hosted OpenAI account **or a local Ollama server**. Pick one.
 
-   ```
-   OPENAI_API_KEY=<your key>
-   OPENAI_MODEL=gpt-4o-mini
-   ```
+### Option A — hosted OpenAI
 
-2. Verify it end to end before starting the server:
+Put a key in the root `.env`:
+
+```
+OPENAI_API_KEY=<your key>
+OPENAI_MODEL=gpt-4o-mini
+```
+
+Note that OpenAI accounts need a **credit balance**; a valid key on an empty
+account returns HTTP 429 with `insufficient_quota`. The app reports this
+separately as `402 llm_quota_exhausted` because retrying cannot fix it.
+
+### Option B — local Ollama (free, no account)
+
+1. Install and start [Ollama](https://ollama.com).
+2. Pull a model. Choose one with tool-calling support, because the Phase 5–6
+   agents need to select tools and emit structured JSON:
 
    ```powershell
-   .\.venv\Scripts\python.exe scripts\check_llm.py
+   ollama pull llama3.1:8b
    ```
 
-   This makes a real chat call and a real structured-output call and prints the
-   result. A green result means the API will work. It never prints the key.
+3. Set these in the root `.env`:
 
-3. Without a key the platform still runs — `/api/chat` returns HTTP 503 with a
-   message naming the missing setting. It never fabricates an answer.
+   ```
+   OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+   OPENAI_API_KEY=ollama          # Ollama ignores the value, but it must be non-empty
+   OPENAI_MODEL=llama3.1:8b
+   ```
+
+Ollama has no API keys. The client requires a non-empty value, so any
+placeholder works.
+
+### Verify either option
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe scripts\check_llm.py
+```
+
+This makes a real chat call and a real structured-output call and prints the
+result. A green result means the API will work. It never prints the key.
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `503 llm_not_configured` | `OPENAI_API_KEY` is empty in `.env`. |
+| `502 llm_connection_failed` | Ollama is not running, or `OPENAI_BASE_URL` is wrong/not set. Check with `ollama list` and open `http://127.0.0.1:11434/api/tags`. |
+| `502 llm_authentication_failed` | The key was rejected (wrong, revoked, or another project's). |
+| `402 llm_quota_exhausted` | The account has no credits. Add credits — retrying will not help. |
+| `429 llm_rate_limited` | Genuine throttling. Wait and retry. |
+| Model errors after `ollama pull` | Confirm the `.env` model name matches `ollama list` exactly, including the tag (`llama3.1:8b`, not `llama3.1`). |
+| First response is very slow | A local 8B model on CPU loads into memory on first use. Later responses are faster. |
 
 ### Choosing a model
 
 Model names change over time, so `OPENAI_MODEL` is configurable. Any model your
-key can access works; `check_llm.py` tells you immediately if a name is wrong.
+provider can serve works; `check_llm.py` tells you immediately if a name is wrong.
 
 ### Using a different provider
 
-`app/llm/factory.py` is the only place that knows about OpenAI. Support for
-another OpenAI-compatible endpoint needs no code change — set `OPENAI_BASE_URL`.
-A genuinely different provider means adding one branch to `build_chat_model`.
+`app/llm/factory.py` is the only place that knows about the OpenAI API surface.
+Any OpenAI-compatible endpoint needs no code change — set `OPENAI_BASE_URL`.
+A genuinely different protocol means adding one branch to `build_chat_model`.
 
 ---
 
@@ -192,17 +232,20 @@ LangGraph supervisor consumes in Phase 5:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 67 passed, 2 skipped
+.\.venv\Scripts\python.exe -m pytest          # 73 passed, 2 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
 
-The 2 skipped tests are **live** LLM tests (they cost money and need a key).
+The 2 skipped tests are **live** LLM tests (they need a running provider).
 They are opt-in:
 
 ```powershell
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
+
+With a provider running the whole suite is green: **75 passed**, including two
+real model calls.
 
 The default suite never touches the network: it runs the real application code
 against an in-process fake chat model.

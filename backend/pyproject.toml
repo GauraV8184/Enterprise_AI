@@ -13,6 +13,14 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q --strict-markers"
 asyncio_mode = "auto"
+# All async tests share one event loop for the whole session.
+#
+# This mirrors production (Uvicorn serves every request from a single loop) and
+# is required here because langchain-openai keeps a module-global shared async
+# HTTP client. That client binds to the event loop it first uses, so with a
+# fresh loop per test the second test would fail with "Event loop is closed".
+asyncio_default_test_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "session"
 markers = [
     "integration: tests that require real external services (deselect with '-m \"not integration\"')",
 ]

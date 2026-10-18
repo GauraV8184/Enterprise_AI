@@ -25,8 +25,10 @@ class LlmNotConfiguredError(LlmError):
     status_code = 503
     code = "llm_not_configured"
     public_message = (
-        "The language model is not configured. Set OPENAI_API_KEY in your .env file "
-        "(optionally LLM_PROVIDER and OPENAI_MODEL)."
+        "The language model is not configured. Set OPENAI_API_KEY in the repository-root "
+        ".env file. For a local Ollama server, also set "
+        "OPENAI_BASE_URL=http://127.0.0.1:11434/v1 and any non-empty key "
+        "(Ollama ignores it). Verify with: python scripts/check_llm.py"
     )
 
 

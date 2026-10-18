@@ -202,6 +202,20 @@ response, so classification silently fell through for constructed errors.
 `_provider_error_fields` now falls back to reading the parsed body, which is
 also more resilient to SDK differences.
 
+**6. A wrapper error hid the real diagnosis.** The live structured-output test
+failed with `RuntimeError("v2 stream finished without producing a message")` -
+LangChain's streaming accumulator replacing a failed request. The real cause
+(`Event loop is closed`) was buried in the exception chain. `map_exception` now
+walks `__cause__`/`__context__` to recover the original provider error, so a
+wrapped failure is still classified correctly.
+
+**7. `langchain-openai` shares one global async HTTP client.** It is a
+module-level client, so a fresh `ChatOpenAI` does *not* get its own connection
+pool - the client binds to the first event loop that uses it. With
+pytest-asyncio's default of one loop per test, the second live test failed.
+Fixed by configuring a session-scoped event loop, which also mirrors production:
+Uvicorn serves every request from a single loop.
+
 ## 11. Security posture so far
 
 Established now:

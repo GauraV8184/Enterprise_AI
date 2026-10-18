@@ -182,6 +182,39 @@ def _classify_rate_limit(exc: RateLimitError) -> AppError:
     return LlmRateLimitError(details={"provider_code": code or error_type or "unknown"})
 
 
+# Specific provider errors worth recovering from a wrapper's cause chain.
+# The generic APIError is deliberately excluded: it carries no extra detail, so
+# digging for it would not improve the classification.
+_KNOWN_PROVIDER_ERRORS = (
+    AuthenticationError,
+    PermissionDeniedError,
+    RateLimitError,
+    APITimeoutError,
+    APIConnectionError,
+    APIStatusError,
+    OutputParserException,
+)
+
+
+def _find_provider_cause(exc: BaseException) -> BaseException | None:
+    """Walk the exception chain looking for the original provider error.
+
+    Wrappers can hide a specific provider error behind a generic one. LangChain's
+    streaming accumulator, for example, replaces a failed request with
+    ``RuntimeError("v2 stream finished without producing a message")``, which
+    would otherwise be reported as a vague provider error. The original is still
+    reachable through ``__cause__``/``__context__``.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _KNOWN_PROVIDER_ERRORS):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def map_exception(exc: BaseException) -> AppError:
     """Translate a provider exception into a client-safe application error.
 
@@ -207,6 +240,12 @@ def map_exception(exc: BaseException) -> AppError:
         return LlmProviderError(details={"provider_status": exc.status_code})
     if isinstance(exc, APIError):
         return LlmProviderError()
+
+    # A wrapper may have hidden the real provider error - look for it.
+    cause = _find_provider_cause(exc)
+    if cause is not None:
+        return map_exception(cause)
+
     return LlmProviderError()
 
 
