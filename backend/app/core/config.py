@@ -23,7 +23,15 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Environment = Literal["development", "staging", "production", "test"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-LlmProvider = Literal["openai"]
+LlmProvider = Literal["openai", "ollama"]
+
+# Values accepted for LLM_PROVIDER. "ollama" is a convenience alias: Ollama
+# exposes an OpenAI-compatible API, so it reuses the same client and the same
+# OPENAI_* settings, but needs no API key and defaults to a local base URL.
+SUPPORTED_LLM_PROVIDERS = frozenset({"openai", "ollama"})
+
+# Where a local Ollama server listens by default.
+OLLAMA_DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
 
 # ``backend/app/core/config.py`` -> repo root is three parents up. Resolving the
 # .env path absolutely means the app finds the same file no matter which
@@ -116,6 +124,27 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def _validate_llm_provider(cls, value: object) -> object:
+        """Normalise the provider name and explain bad input clearly.
+
+        Pydantic's built-in Literal error ("Input should be 'openai'") does not
+        tell you how to talk to a local model, which is a confusing dead end.
+        """
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in SUPPORTED_LLM_PROVIDERS:
+                return normalized
+            raise ValueError(
+                f"Unsupported LLM_PROVIDER {value!r}. "
+                f"Supported values: {', '.join(sorted(SUPPORTED_LLM_PROVIDERS))}. "
+                "For a local Ollama server use LLM_PROVIDER=ollama; for any other "
+                "OpenAI-compatible endpoint use LLM_PROVIDER=openai together with "
+                "OPENAI_BASE_URL."
+            )
+        return value
+
     # --- Convenience properties ---------------------------------------------
     @property
     def is_production(self) -> bool:
@@ -127,10 +156,42 @@ class Settings(BaseSettings):
 
     @property
     def llm_configured(self) -> bool:
-        """True when enough settings exist to build an LLM client."""
+        """True when enough settings exist to build an LLM client.
+
+        For ``ollama`` this is always true: a local server needs no API key, and
+        mismatches (server down, model not pulled) are reported with specific
+        errors on the first call instead.
+        """
+        if self.llm_provider == "ollama":
+            return True
         if self.llm_provider == "openai":
             return self.openai_api_key is not None
         return False
+
+    @property
+    def effective_base_url(self) -> str | None:
+        """The endpoint the client will actually call.
+
+        ``None`` means the provider library default (api.openai.com).
+        """
+        if self.openai_base_url:
+            return self.openai_base_url
+        if self.llm_provider == "ollama":
+            return OLLAMA_DEFAULT_BASE_URL
+        return None
+
+    @property
+    def effective_api_key(self) -> str | None:
+        """The credential to send, if any.
+
+        Ollama ignores the value, so a placeholder is supplied when none is set -
+        this keeps the client happy without inventing a real credential.
+        """
+        if self.openai_api_key is not None:
+            return self.openai_api_key.get_secret_value()
+        if self.llm_provider == "ollama":
+            return "ollama"
+        return None
 
 
 @lru_cache

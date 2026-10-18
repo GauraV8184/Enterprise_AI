@@ -139,13 +139,17 @@ separately as `402 llm_quota_exhausted` because retrying cannot fix it.
 3. Set these in the root `.env`:
 
    ```
-   OPENAI_BASE_URL=http://127.0.0.1:11434/v1
-   OPENAI_API_KEY=ollama          # Ollama ignores the value, but it must be non-empty
+   LLM_PROVIDER=ollama
    OPENAI_MODEL=llama3.1:8b
    ```
 
-Ollama has no API keys. The client requires a non-empty value, so any
-placeholder works.
+That is all — `/api/chat/status` will report `"configured": true`. There is **no
+API key**: a local server does not need one, and the `ollama` provider does not
+ask for one. If your server is not on localhost, add
+`OPENAI_BASE_URL=http://<host>:11434/v1`.
+
+Use `LLM_PROVIDER=openai` (plus `OPENAI_BASE_URL` and a key) only when you are
+talking to a hosted OpenAI-compatible *service* that requires credentials.
 
 ### Verify either option
 
@@ -185,7 +189,8 @@ configuration state without sending a message.
 
 | Symptom | Cause and fix |
 |---|---|
-| `503 llm_not_configured` | `OPENAI_API_KEY` is empty in `.env`. |
+| `503 llm_not_configured` | `OPENAI_API_KEY` is empty while `LLM_PROVIDER=openai`. For a local server use `LLM_PROVIDER=ollama` instead — no key needed. |
+| Validation error on `llm_provider` | Bad `LLM_PROVIDER` value. Supported: `openai`, `ollama`. |
 | `502 llm_connection_failed` | Ollama is not running, or `OPENAI_BASE_URL` is wrong/not set. Check with `ollama list` and open `http://127.0.0.1:11434/api/tags`. |
 | `502 llm_authentication_failed` | The key was rejected (wrong, revoked, or another project's). |
 | `402 llm_quota_exhausted` | The account has no credits. Add credits — retrying will not help. |

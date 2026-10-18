@@ -36,8 +36,11 @@ async def main() -> int:
     print("-" * 60)
     _line("provider", settings.llm_provider)
     _line("model", settings.openai_model)
-    _line("api key present", settings.openai_api_key is not None)
-    _line("custom base url", settings.openai_base_url or "(default OpenAI)")
+    if settings.llm_provider == "ollama":
+        _line("api key", "not required for a local server")
+    else:
+        _line("api key present", settings.openai_api_key is not None)
+    _line("endpoint", settings.effective_base_url or "(provider default: api.openai.com)")
     _line("timeout (s)", settings.llm_timeout_seconds)
     _line("max retries", settings.llm_max_retries)
     _line("environment", settings.environment)
@@ -45,6 +48,7 @@ async def main() -> int:
     if not settings.llm_configured:
         print("\nRESULT: not configured.")
         print("  Add OPENAI_API_KEY to the .env file in the repository root, then retry.")
+        print("  For a local Ollama server, use LLM_PROVIDER=ollama (no key needed).")
         return 1
 
     try:
