@@ -42,11 +42,28 @@ class LlmAuthenticationError(LlmError):
 
 
 class LlmRateLimitError(LlmError):
-    """Provider throttled us."""
+    """Provider throttled us. Retrying later can help."""
 
     status_code = 429
     code = "llm_rate_limited"
     public_message = "The language model provider rate-limited this request. Retry shortly."
+
+
+class LlmQuotaExhaustedError(LlmError):
+    """The account has no credits / quota left.
+
+    Providers report this as HTTP 429, the same status as rate limiting, but the
+    remedy is completely different - retrying never helps. Keeping it a separate
+    error type is what stops the platform from giving useless advice.
+    """
+
+    status_code = 402
+    code = "llm_quota_exhausted"
+    public_message = (
+        "The language model account has no credits or quota remaining, so requests "
+        "cannot be served. Add credits to the provider account (for OpenAI: "
+        "https://platform.openai.com/settings/organization/billing/). Retrying will not help."
+    )
 
 
 class LlmTimeoutError(LlmError):

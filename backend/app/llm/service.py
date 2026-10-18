@@ -43,6 +43,7 @@ from app.llm.errors import (
     LlmAuthenticationError,
     LlmConnectionError,
     LlmProviderError,
+    LlmQuotaExhaustedError,
     LlmRateLimitError,
     LlmStructuredOutputError,
     LlmTimeoutError,
@@ -133,6 +134,54 @@ def _extract_usage(message: BaseMessage) -> TokenUsage | None:
     )
 
 
+# Provider codes that mean "out of credits/quota" rather than "slow down".
+# OpenAI reports both as HTTP 429, which is why the body must be inspected.
+_QUOTA_ERROR_CODES = frozenset(
+    {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "billing_hard_limit_reached",
+        "quota_exceeded",
+        "exceeded_quota",
+    }
+)
+
+
+def _provider_error_fields(exc: BaseException) -> tuple[str, str]:
+    """Extract the provider's ``(code, type)`` regardless of SDK version.
+
+    The openai SDK exposes these as attributes, but they are only populated when
+    the error originates from a real HTTP response. Reading the parsed body as a
+    fallback keeps classification working for errors constructed in tests and for
+    providers that populate only one of the two.
+    """
+    code = str(getattr(exc, "code", "") or "").lower()
+    error_type = str(getattr(exc, "type", "") or "").lower()
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            code = code or str(error.get("code") or "").lower()
+            error_type = error_type or str(error.get("type") or "").lower()
+
+    return code, error_type
+
+
+def _classify_rate_limit(exc: RateLimitError) -> AppError:
+    """Split HTTP 429 into "out of credits" vs "slow down".
+
+    Retrying is futile for the first and correct for the second, so conflating
+    them produces actively misleading advice. Providers that expose neither
+    field fall back to the rate-limit interpretation.
+    """
+    code, error_type = _provider_error_fields(exc)
+
+    if code in _QUOTA_ERROR_CODES or error_type == "insufficient_quota":
+        return LlmQuotaExhaustedError(details={"provider_code": code or error_type or "unknown"})
+    return LlmRateLimitError(details={"provider_code": code or error_type or "unknown"})
+
+
 def map_exception(exc: BaseException) -> AppError:
     """Translate a provider exception into a client-safe application error.
 
@@ -145,7 +194,7 @@ def map_exception(exc: BaseException) -> AppError:
     if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
         return LlmAuthenticationError()
     if isinstance(exc, RateLimitError):
-        return LlmRateLimitError()
+        return _classify_rate_limit(exc)
     if isinstance(exc, (APITimeoutError, asyncio.TimeoutError, TimeoutError)):
         return LlmTimeoutError()
     if isinstance(exc, APIConnectionError):

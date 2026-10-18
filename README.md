@@ -233,11 +233,17 @@ Every expected failure has a stable `code` and an actionable message:
 |---|---|---|
 | `llm_not_configured` | 503 | no API key set |
 | `llm_authentication_failed` | 502 | provider rejected the key |
-| `llm_rate_limited` | 429 | provider throttled us |
+| `llm_quota_exhausted` | 402 | account has no credits left — retrying will not help |
+| `llm_rate_limited` | 429 | provider throttled us — retrying later helps |
 | `llm_timeout` | 504 | provider did not answer in time |
 | `llm_connection_failed` | 502 | network/base-URL problem |
 | `llm_provider_error` | 502 | any other provider error |
 | `llm_structured_output_failed` | 502 | response did not match the schema |
+
+Note that providers report *exhausted credits* and *throttling* with the same
+HTTP status (429). They need opposite responses, so the platform inspects the
+provider's error code and returns `402` for an empty balance. Retrying an empty
+balance can never succeed, and telling you to retry would be bad advice.
 
 Responses include `request_id`, which also appears in the logs and in the
 `X-Request-ID` header — so a user-visible error can be traced to a log line.

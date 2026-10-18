@@ -10,6 +10,7 @@ from app.llm.errors import (
     LlmAuthenticationError,
     LlmConnectionError,
     LlmProviderError,
+    LlmQuotaExhaustedError,
     LlmRateLimitError,
     LlmStructuredOutputError,
     LlmTimeoutError,
@@ -26,6 +27,7 @@ from tests.fakes import (
     FakeChatModel,
     make_authentication_error,
     make_connection_error,
+    make_quota_error,
     make_rate_limit_error,
     make_status_error,
     make_timeout_error,
@@ -184,6 +186,23 @@ def test_map_exception_records_provider_status_but_not_body() -> None:
     error = map_exception(make_status_error(503))
     assert error.details["provider_status"] == 503
     assert "service unavailable" not in error.message
+
+
+def test_exhausted_quota_is_not_reported_as_a_rate_limit() -> None:
+    """Both arrive as HTTP 429, but retrying only helps one of them."""
+    error = map_exception(make_quota_error())
+    assert isinstance(error, LlmQuotaExhaustedError)
+    assert error.code == "llm_quota_exhausted"
+    assert error.details["provider_code"] == "credit_balance_exhausted"
+    # The advice must point at billing, not at waiting.
+    assert "retrying will not help" in error.message.lower()
+
+
+def test_genuine_rate_limit_still_reports_as_rate_limited() -> None:
+    error = map_exception(make_rate_limit_error())
+    assert isinstance(error, LlmRateLimitError)
+    assert not isinstance(error, LlmQuotaExhaustedError)
+    assert error.code == "llm_rate_limited"
 
 
 def test_unknown_exception_becomes_provider_error() -> None:

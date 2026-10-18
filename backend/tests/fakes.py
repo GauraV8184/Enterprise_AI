@@ -93,11 +93,11 @@ class FakeChatModel(BaseChatModel):
 _API_URL = "https://api.openai.com/v1/chat/completions"
 
 
-def _response(status_code: int) -> httpx2.Response:
+def _response(status_code: int, body: dict | None = None) -> httpx2.Response:
     return httpx2.Response(
         status_code,
         request=httpx2.Request("POST", _API_URL),
-        json={"error": {"message": "provider error"}},
+        json=body or {"error": {"message": "provider error"}},
     )
 
 
@@ -110,11 +110,28 @@ def make_authentication_error() -> Exception:
 
 
 def make_rate_limit_error() -> Exception:
+    """Genuine throttling: retrying later is the right response."""
     return openai.RateLimitError(
         "Rate limit reached",
         response=_response(429),
-        body={"error": {"message": "Rate limit reached"}},
+        body={"error": {"message": "Rate limit reached", "type": "rate_limit_error"}},
     )
+
+
+def make_quota_error() -> Exception:
+    """HTTP 429 caused by an empty credit balance, not throttling.
+
+    Captured from a real OpenAI response so the fake matches production.
+    """
+    body = {
+        "error": {
+            "message": "You have no credits remaining.",
+            "type": "insufficient_quota",
+            "param": None,
+            "code": "credit_balance_exhausted",
+        }
+    }
+    return openai.RateLimitError("no credits remaining", response=_response(429, body), body=body)
 
 
 def make_timeout_error() -> Exception:

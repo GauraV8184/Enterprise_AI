@@ -189,6 +189,19 @@ once a `.env` actually existed: `pydantic-settings` tries to JSON-decode list
 fields *before* field validators run. Fixed with the documented `NoDecode`
 annotation.
 
+**4. Exhausted credits were reported as throttling.** Providers return HTTP 429
+both when you are being throttled *and* when the account has no credit left.
+The original mapping sent both to `llm_rate_limited`, whose advice is "retry
+shortly" — useless when the balance is empty. `_classify_rate_limit` now
+inspects the provider's error code and returns a distinct `llm_quota_exhausted`
+(HTTP 402) pointing at billing.
+
+**5. The first fix for #4 didn't work, and the test caught it.** The openai SDK
+only populates `exc.code` / `exc.type` when the error came from a real HTTP
+response, so classification silently fell through for constructed errors.
+`_provider_error_fields` now falls back to reading the parsed body, which is
+also more resilient to SDK differences.
+
 ## 11. Security posture so far
 
 Established now:

@@ -109,6 +109,22 @@ def test_provider_rate_limit_becomes_429(llm_client: TestClient, fake_model) -> 
     assert response.json()["code"] == "llm_rate_limited"
 
 
+def test_exhausted_credits_return_402_with_billing_advice(
+    llm_client: TestClient, fake_model
+) -> None:
+    """An empty balance must not be reported as something retrying would fix."""
+    from tests.fakes import make_quota_error
+
+    fake_model.error = make_quota_error()
+    response = llm_client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]})
+    assert response.status_code == 402
+
+    body = response.json()
+    assert body["code"] == "llm_quota_exhausted"
+    assert "billing" in body["detail"]
+    assert body["details"]["provider_code"] == "credit_balance_exhausted"
+
+
 def test_provider_auth_error_is_reported_clearly(llm_client: TestClient, fake_model) -> None:
     from tests.fakes import make_authentication_error
 
