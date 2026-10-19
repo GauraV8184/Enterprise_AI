@@ -28,3 +28,10 @@ pymupdf>=1.24,<2.0                # PDF text extraction (import pymupdf, not fit
 python-docx>=1.1,<2.0             # Word documents
 openpyxl>=3.1,<4.0                # Excel .xlsx
 pandas>=2.2,<4.0                  # CSV and Excel row handling
+
+# --- Authentication (Phase 4) ------------------------------------------------
+# Verifies Supabase access tokens against the project's published JWKS. The
+# [crypto] extra pulls in `cryptography`, which is what actually implements
+# ES256/RS256 signature checking - without it PyJWT only handles HMAC, and this
+# application deliberately refuses symmetric tokens.
+PyJWT[crypto]>=2.9,<3.0
