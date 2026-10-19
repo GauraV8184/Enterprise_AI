@@ -128,6 +128,31 @@ class Settings(BaseSettings):
     # testing; without it this id is used. Refused outright in production.
     dev_user_id: str = "dev-user"
 
+    # --- Supabase (Phase 4) --------------------------------------------------
+    supabase_url: str | None = None
+    supabase_anon_key: SecretStr | None = None
+    supabase_service_role_key: SecretStr | None = None
+    supabase_documents_bucket: str = "documents"
+
+    # Full Postgres connection string, used ONLY by scripts/apply_migrations.py.
+    # The application never opens a direct connection: it goes through PostgREST
+    # so that Row Level Security applies to every query. Paste it from
+    # Dashboard -> Connect -> Session pooler (the direct db.<ref> host is
+    # IPv6-only on current projects, so the pooler is the reliable choice).
+    supabase_db_url: SecretStr | None = None
+
+    # Which store holds documents and vectors.
+    #   auto     - Supabase when configured, otherwise the local SQLite store
+    #   sqlite   - always the local development store
+    #   supabase - always Supabase; fail at startup if it is not configured
+    document_store: Literal["auto", "sqlite", "supabase"] = "auto"
+
+    # Identity source for document endpoints.
+    #   auto     - Supabase Auth when configured, otherwise the dev header stub
+    #   dev      - always the development stub (never allowed in production)
+    #   supabase - always Supabase Auth; fail at startup if it is not configured
+    auth_backend: Literal["auto", "dev", "supabase"] = "auto"
+
     # --- Validators ----------------------------------------------------------
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -262,6 +287,71 @@ class Settings(BaseSettings):
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
+
+    # -- Supabase -------------------------------------------------------------
+
+    @property
+    def supabase_configured(self) -> bool:
+        """True when the URL and public key are present."""
+        return bool(self.supabase_url and self.supabase_anon_key)
+
+    @property
+    def supabase_admin_configured(self) -> bool:
+        """True when the privileged key is present.
+
+        Only admin scripts need this. The application deliberately does not use
+        it for user traffic, because it bypasses Row Level Security.
+        """
+        return bool(self.supabase_url and self.supabase_service_role_key)
+
+    @property
+    def supabase_base(self) -> str:
+        """Project base URL, without a trailing slash."""
+        if not self.supabase_url:
+            raise ValueError("SUPABASE_URL is not set.")
+        return self.supabase_url.rstrip("/")
+
+    def supabase_service_url(self, service: Literal["rest", "auth", "storage"]) -> str:
+        """Base URL for one Supabase sub-service."""
+        return f"{self.supabase_base}/{service}/v1"
+
+    @property
+    def use_supabase_store(self) -> bool:
+        """Whether documents and vectors live in Supabase."""
+        if self.document_store == "supabase":
+            return True
+        if self.document_store == "sqlite":
+            return False
+        return self.supabase_configured
+
+    @property
+    def use_supabase_auth(self) -> bool:
+        """Whether identity comes from Supabase Auth.
+
+        ``auto`` prefers Supabase whenever it is configured, because the
+        development header stub is not a security control.
+        """
+        if self.auth_backend == "supabase":
+            return True
+        if self.auth_backend == "dev":
+            return False
+        return self.supabase_configured
+
+    def validate_supabase_expectations(self) -> None:
+        """Fail fast on combinations that cannot work.
+
+        Raises:
+            ValueError: an explicit backend was requested without credentials.
+        """
+        if self.document_store == "supabase" and not self.supabase_configured:
+            raise ValueError("DOCUMENT_STORE=supabase requires SUPABASE_URL and SUPABASE_ANON_KEY.")
+        if self.auth_backend == "supabase" and not self.supabase_configured:
+            raise ValueError("AUTH_BACKEND=supabase requires SUPABASE_URL and SUPABASE_ANON_KEY.")
+        if self.is_production and not self.supabase_configured:
+            raise ValueError(
+                "ENVIRONMENT=production requires Supabase: without it there is no way to "
+                "authenticate callers, and refusing to serve is safer than trusting a header."
+            )
 
 
 @lru_cache
