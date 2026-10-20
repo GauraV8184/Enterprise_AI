@@ -243,9 +243,15 @@ grant all on public.chunks    to service_role;
 -- embedding of another tenant's document can never be ranked. A SECURITY
 -- DEFINER version would look identical and quietly return everyone's data.
 --
--- min_similarity defaults to 0.0, i.e. "return the nearest passages whatever
--- their score". The retriever applies the real relevance floor in Python so the
--- threshold can be tuned without a migration.
+-- min_similarity defaults to 0.0, matching DEFAULT_MIN_SCORE in
+-- app/rag/retriever.py: passages anti-correlated with the query (cosine below
+-- zero) are dropped rather than ranked. Real embedding models put *unrelated*
+-- text around 0.5-0.65, so this floor only ever bites on genuinely opposed
+-- vectors - it is not a relevance cutoff. Pass -1.0 to disable it entirely.
+--
+-- Keeping the SQL and Python defaults equal matters. If they diverged, the
+-- database and the application would disagree about which passages are
+-- candidates, and the answer would depend on which layer ran first.
 -- -----------------------------------------------------------------------------
 create or replace function public.match_document_chunks(
     query_embedding     vector(768),
