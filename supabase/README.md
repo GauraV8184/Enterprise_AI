@@ -135,6 +135,34 @@ bare basename before it is used.
 
 ---
 
+## How the application reaches the database
+
+`DOCUMENT_STORE=auto` (the default) uses Postgres whenever `SUPABASE_URL` and
+`SUPABASE_ANON_KEY` are set; otherwise it stays on the SQLite development store.
+
+Every query goes through `app/database/postgrest.py`, which builds a fresh client
+per request carrying that caller's `Authorization` header. The service-role key
+is not reachable from the application at all: it is read only by
+`scripts/apply_migrations.py` and by the live checks below.
+
+Similarity search is a single RPC call, `match_document_chunks`, so ranking runs
+next to the data and uses `chunks_embedding_hnsw_idx`. The Python side never
+downloads embeddings to compare them.
+
+### Verifying it
+
+| Command | What it proves |
+| --- | --- |
+| `python scripts/check_supabase.py` | credentials work, the schema and policies exist, and the catalog does not over-grant privileges |
+| `python scripts/check_rls.py` | two real users cannot reach each other's rows through the REST API directly |
+| `python scripts/check_store.py` | the application's own store works end to end and stays tenant-scoped |
+
+The first two create users through the admin API; the third drives the repository
+exactly as a request would, with real access tokens. All three delete what they
+create.
+
+---
+
 ## Changing the embedding model
 
 `chunks.embedding` is `vector(768)`, which matches `nomic-embed-text`. pgvector

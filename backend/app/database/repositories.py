@@ -1,21 +1,30 @@
-"""Document and vector-chunk persistence (development store).
+"""Shared store records plus the SQLite implementation.
 
-**Why SQLite.** Phase 4 adds Supabase/Postgres with pgvector as the production
-store. For Phase 3 the goal is a *working, testable* pipeline with no external
-account, so chunks and their embeddings live in SQLite next to the app and are
-searched with NumPy.
+This module holds three things that are not SQLite-specific:
 
-**Why that is honest but limited.** Similarity is computed with a linear scan in
-process, so cost grows with the total number of chunks. That is fine for
-development and unacceptable at scale - pgvector exists precisely to move that
-work into an index. The methods here define the contract Phase 4 implements:
+* the dataclasses every store returns (:class:`DocumentRecord`,
+  :class:`ChunkRecord`, :class:`ChunkMatch`, ...),
+* the :class:`DocumentStore` protocol - the contract
+  :class:`~app.database.supabase_repository.SupabaseDocumentRepository` also
+  satisfies,
+* and the SQLite store itself, which is still what runs on a developer machine.
 
-    create_document  update_status  get_document  list_documents
-    delete_document  add_chunks     fetch_chunks  count_chunks
+**Why SQLite still exists.** It needs no account, no network and no migration, so
+the whole pipeline stays testable offline. It is a development store, not a
+production one.
+
+**Why ranking is a store operation.** ``search_chunks`` takes an embedding and
+returns ranked matches. On SQLite that means loading the corpus and comparing in
+NumPy: fine for a local file, unacceptable over a network. On Postgres the same
+call becomes one pgvector query. That is why the contract does not expose
+``fetch_chunks`` - downloading every vector to rank it in Python would throw away
+the entire point of the index.
 
 **Tenant isolation.** Every method takes ``owner_id`` and filters on it in the
 SQL. Cross-tenant reads return ``None``/empty rather than raising, so endpoints
-can return 404 without revealing that a document exists for someone else.
+can return 404 without revealing that a document exists for someone else. In the
+Supabase store this filter is a *second* line of defence: Row Level Security
+already decides which rows exist.
 
 **Embeddings** are stored as raw float32 bytes. That keeps the schema portable
 (Postgres becomes ``vector(768)``) and avoids JSON rounding noise.
@@ -30,10 +39,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 
 from app.core.logging import get_logger, safe_extra
+from app.core.vectors import cosine_similarity_matrix
+from app.database.errors import EmbeddingDimensionMismatchError
 
 logger = get_logger(__name__)
 
@@ -125,6 +137,34 @@ class StoredChunk:
     chunk_index: int
 
 
+@dataclass(frozen=True)
+class ChunkMatch:
+    """One ranked passage returned by a similarity search."""
+
+    id: str
+    document_id: str
+    filename: str
+    content: str
+    page: int | None
+    section: str | None
+    chunk_index: int
+    score: float
+
+
+@dataclass(frozen=True)
+class ChunkSearchResult:
+    """Ranked matches, plus how much of the corpus was in scope.
+
+    ``searched_chunks`` is the number of the caller's chunks the query was run
+    against, not the number of vectors an index happened to touch. pgvector's
+    HNSW index is approximate, so those two numbers are not the same thing and
+    reporting the internal one would imply an exactness search does not have.
+    """
+
+    matches: list[ChunkMatch]
+    searched_chunks: int
+
+
 def new_id() -> str:
     return uuid.uuid4().hex
 
@@ -140,6 +180,61 @@ def _to_blob(embedding: np.ndarray) -> bytes:
 
 def _from_blob(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32)
+
+
+class DocumentStore(Protocol):
+    """The contract every store implements.
+
+    Declared structurally, like :class:`app.security.identity.TokenVerifier`, so
+    the retrieval and ingest layers depend on the behaviour without importing
+    either implementation. ``fetch_chunks`` is deliberately absent: see the module
+    docstring for why ranking is a store operation.
+    """
+
+    def create_document(
+        self,
+        *,
+        owner_id: str,
+        filename: str,
+        content_type: str,
+        extension: str,
+        size_bytes: int,
+        status: str = STATUS_PENDING,
+    ) -> DocumentRecord: ...
+
+    def update_status(
+        self,
+        *,
+        owner_id: str,
+        document_id: str,
+        status: str,
+        error: str | None = None,
+        page_count: int | None = None,
+        chunk_count: int | None = None,
+        mark_indexed: bool = False,
+    ) -> bool: ...
+
+    def get_document(self, *, owner_id: str, document_id: str) -> DocumentRecord | None: ...
+
+    def list_documents(self, *, owner_id: str) -> list[DocumentRecord]: ...
+
+    def delete_document(self, *, owner_id: str, document_id: str) -> bool: ...
+
+    def add_chunks(self, chunks: Sequence[ChunkRecord]) -> int: ...
+
+    def delete_document_chunks(self, *, owner_id: str, document_id: str) -> int: ...
+
+    def count_chunks(self, *, owner_id: str, document_id: str | None = None) -> int: ...
+
+    def search_chunks(
+        self,
+        *,
+        owner_id: str,
+        query_embedding: Sequence[float] | np.ndarray,
+        top_k: int,
+        document_ids: Sequence[str] | None = None,
+        min_score: float = 0.0,
+    ) -> ChunkSearchResult: ...
 
 
 class DocumentRepository:
@@ -438,3 +533,62 @@ class DocumentRepository:
 
         matrix = np.vstack([_from_blob(blob) for blob in blobs]).astype(np.float32)
         return chunks, matrix
+
+    def search_chunks(
+        self,
+        *,
+        owner_id: str,
+        query_embedding: Sequence[float] | np.ndarray,
+        top_k: int,
+        document_ids: Sequence[str] | None = None,
+        min_score: float = 0.0,
+    ) -> ChunkSearchResult:
+        """Rank this owner's chunks against ``query_embedding`` in NumPy.
+
+        A full scan: every chunk in scope is loaded and compared. That is the
+        honest cost of a store with no vector index, and it is why the Postgres
+        store implements this method against pgvector rather than reusing it.
+
+        Ties are broken by chunk id so identical requests return identical order.
+        """
+        chunks, matrix = self.fetch_chunks(owner_id=owner_id, document_ids=document_ids)
+        if not chunks or matrix is None or matrix.size == 0:
+            return ChunkSearchResult(matches=[], searched_chunks=len(chunks))
+
+        vector = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
+        if matrix.shape[1] != vector.shape[0]:
+            raise EmbeddingDimensionMismatchError(
+                stored_dimensions=int(matrix.shape[1]),
+                query_dimensions=int(vector.shape[0]),
+            )
+
+        if top_k <= 0:
+            return ChunkSearchResult(matches=[], searched_chunks=len(chunks))
+
+        scores = cosine_similarity_matrix(matrix, vector)
+        ranked = sorted(
+            zip(chunks, scores, strict=True),
+            key=lambda pair: (-float(pair[1]), pair[0].id),
+        )
+
+        matches: list[ChunkMatch] = []
+        for chunk, score in ranked:
+            value = float(score)
+            if value < min_score:
+                continue
+            matches.append(
+                ChunkMatch(
+                    id=chunk.id,
+                    document_id=chunk.document_id,
+                    filename=chunk.filename,
+                    content=chunk.content,
+                    page=chunk.page,
+                    section=chunk.section,
+                    chunk_index=chunk.chunk_index,
+                    score=value,
+                )
+            )
+            if len(matches) >= top_k:
+                break
+
+        return ChunkSearchResult(matches=matches, searched_chunks=len(chunks))

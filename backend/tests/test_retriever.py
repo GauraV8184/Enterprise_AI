@@ -13,9 +13,15 @@ import numpy as np
 import pytest
 
 from app.core.errors import AppError
-from app.database.repositories import ChunkRecord, DocumentRepository, new_id
+from app.database.errors import EmbeddingDimensionMismatchError
+from app.database.repositories import (
+    ChunkMatch,
+    ChunkRecord,
+    ChunkSearchResult,
+    DocumentRepository,
+    new_id,
+)
 from app.rag.retriever import (
-    EmbeddingDimensionMismatchError,
     answer_question,
     format_context,
     search,
@@ -180,6 +186,49 @@ def test_blank_query_is_rejected(
 ) -> None:
     with pytest.raises(AppError, match="must not be blank"):
         search(repository, embeddings, owner_id=ALICE, query="   ", top_k=3)
+
+
+def test_search_delegates_ranking_to_the_store() -> None:
+    """The retriever must not assume the vectors are local.
+
+    This is what lets the Supabase store rank inside pgvector instead of
+    downloading every embedding to Python. If ``search`` reached for
+    ``fetch_chunks`` again, the Postgres path would quietly turn into a full scan
+    over the network - still correct, and useless at scale.
+    """
+
+    class StoreWithoutFetch:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def search_chunks(self, **kwargs: object) -> ChunkSearchResult:
+            self.calls.append(kwargs)
+            return ChunkSearchResult(
+                matches=[
+                    ChunkMatch(
+                        id="c1",
+                        document_id="d1",
+                        filename="handbook.pdf",
+                        content="twenty days",
+                        page=4,
+                        section="Leave",
+                        chunk_index=0,
+                        score=0.9,
+                    )
+                ],
+                searched_chunks=4,
+            )
+
+    store = StoreWithoutFetch()
+    result = search(  # type: ignore[arg-type]
+        store, HashingEmbeddings(), owner_id=ALICE, query="leave", top_k=2
+    )
+
+    assert store.calls[0]["top_k"] == 2
+    assert store.calls[0]["owner_id"] == ALICE
+    assert result.searched_chunks == 4
+    assert result.matches[0].chunk_id == "c1"
+    assert result.matches[0].citation == "handbook.pdf, page 4 (Leave)"
 
 
 # --------------------------------------------------------------------------

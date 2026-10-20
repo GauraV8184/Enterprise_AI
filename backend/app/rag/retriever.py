@@ -25,10 +25,9 @@ from langchain_core.language_models import BaseChatModel
 
 from app.core.errors import AppError
 from app.core.logging import get_logger, safe_extra
-from app.database.repositories import DocumentRepository
+from app.database.repositories import ChunkMatch, DocumentStore
 from app.llm.prompts import RAG_SYSTEM_PROMPT, build_grounded_answer_prompt
 from app.llm.service import TokenUsage, generate_answer
-from app.rag.loaders import cosine_similarity_matrix
 
 logger = get_logger(__name__)
 
@@ -106,36 +105,25 @@ class EmptyQueryError(AppError):
     public_message = "The query must not be blank."
 
 
-def _require_dimension_match(matrix: np.ndarray, query_vector: np.ndarray) -> None:
-    if matrix.size and matrix.shape[1] != query_vector.shape[0]:
-        raise EmbeddingDimensionMismatchError(
-            stored_dimensions=int(matrix.shape[1]),
-            query_dimensions=int(query_vector.shape[0]),
-        )
+def _to_retrieved(match: ChunkMatch) -> RetrievedChunk:
+    """Store row -> API shape.
 
-
-class EmbeddingDimensionMismatchError(AppError):
-    """Stored vectors and the current embedding model disagree.
-
-    This happens when ``EMBEDDING_MODEL`` changes after documents were indexed.
-    Comparing the two would be meaningless, so the request fails with an
-    explanation instead of returning silently bad search results.
+    One conversion point, so the citations a caller sees and the passages the
+    model was given can never drift apart.
     """
-
-    status_code = 409
-    code = "embedding_dimension_mismatch"
-
-    def __init__(self, *, stored_dimensions: int, query_dimensions: int) -> None:
-        super().__init__(
-            f"Stored chunks were embedded with a {stored_dimensions}-dimensional model, but the "
-            f"configured model produces {query_dimensions} dimensions. Re-upload the documents, or "
-            "restore the previous EMBEDDING_MODEL."
-        )
-        self.public_message = self.message
+    return RetrievedChunk(
+        chunk_id=match.id,
+        document_id=match.document_id,
+        filename=match.filename,
+        content=match.content,
+        page=match.page,
+        section=match.section,
+        score=match.score,
+    )
 
 
 def search(
-    repository: DocumentRepository,
+    repository: DocumentStore,
     embeddings: Embeddings,
     *,
     owner_id: str,
@@ -146,58 +134,35 @@ def search(
 ) -> SearchResult:
     """Semantic search over the caller's own chunks.
 
-    ``owner_id`` is threaded into the query rather than applied after the fact,
-    so another tenant's vectors are never loaded into memory in the first place.
+    Ranking is delegated to the store: NumPy for SQLite, pgvector for Postgres.
+    ``owner_id`` is part of that call rather than a post-filter, so another
+    tenant's vectors are excluded before any comparison happens - by the SQL in
+    one backend and by Row Level Security in the other.
     """
     cleaned = query.strip()
     if not cleaned:
         raise EmptyQueryError()
 
-    chunks, matrix = repository.fetch_chunks(owner_id=owner_id, document_ids=document_ids)
-    if not chunks:
-        return SearchResult(query=cleaned, matches=[], searched_chunks=0)
-
     query_vector = np.asarray(embeddings.embed_query(cleaned), dtype=np.float32)
-    _require_dimension_match(matrix, query_vector)
-
-    scores = cosine_similarity_matrix(matrix, query_vector)
-
-    # Rank by score, then by chunk id. Ids never change for a stored corpus, so
-    # results are stable across identical requests even when scores tie exactly.
-    ranked = sorted(
-        zip(chunks, scores, strict=True),
-        key=lambda pair: (-float(pair[1]), pair[0].id),
+    result = repository.search_chunks(
+        owner_id=owner_id,
+        query_embedding=query_vector,
+        top_k=top_k,
+        document_ids=document_ids,
+        min_score=min_score,
     )
-
-    matches: list[RetrievedChunk] = []
-    for chunk, score in ranked:
-        value = float(score)
-        if value < min_score:
-            continue
-        matches.append(
-            RetrievedChunk(
-                chunk_id=chunk.id,
-                document_id=chunk.document_id,
-                filename=chunk.filename,
-                content=chunk.content,
-                page=chunk.page,
-                section=chunk.section,
-                score=value,
-            )
-        )
-        if len(matches) >= top_k:
-            break
+    matches = [_to_retrieved(match) for match in result.matches]
 
     logger.info(
         "retrieval_completed",
         extra=safe_extra(
-            searched_chunks=len(chunks),
+            searched_chunks=result.searched_chunks,
             returned=len(matches),
             top_k=top_k,
             best_score=round(matches[0].score, 4) if matches else None,
         ),
     )
-    return SearchResult(query=cleaned, matches=matches, searched_chunks=len(chunks))
+    return SearchResult(query=cleaned, matches=matches, searched_chunks=result.searched_chunks)
 
 
 def format_context(
@@ -228,7 +193,7 @@ def format_context(
 
 
 async def answer_question(
-    repository: DocumentRepository,
+    repository: DocumentStore,
     embeddings: Embeddings,
     model: BaseChatModel,
     *,
@@ -249,55 +214,37 @@ async def answer_question(
     if not cleaned:
         raise EmptyQueryError("The question must not be blank.")
 
-    chunks, matrix = repository.fetch_chunks(owner_id=owner_id, document_ids=document_ids)
-    if not chunks:
-        return RagAnswer(
-            question=cleaned,
-            answer=(
+    query_vector = np.asarray(await embeddings.aembed_query(cleaned), dtype=np.float32)
+    result = repository.search_chunks(
+        owner_id=owner_id,
+        query_embedding=query_vector,
+        top_k=top_k,
+        document_ids=document_ids,
+        min_score=min_score,
+    )
+    candidates = [_to_retrieved(match) for match in result.matches]
+
+    if not candidates:
+        # Two different empty outcomes, and they mean different things to the user.
+        if result.searched_chunks == 0:
+            answer = (
                 "No documents have been indexed yet, so this cannot be answered from your "
                 "documents. Upload a document and try again."
-            ),
-            sources=[],
-            searched_chunks=0,
-            grounded=False,
-        )
-
-    query_vector = np.asarray(await embeddings.aembed_query(cleaned), dtype=np.float32)
-    _require_dimension_match(matrix, query_vector)
-    scores = cosine_similarity_matrix(matrix, query_vector)
-
-    ranked = sorted(
-        zip(chunks, scores, strict=True),
-        key=lambda pair: (-float(pair[1]), pair[0].id),
-    )
-
-    candidates = [
-        RetrievedChunk(
-            chunk_id=chunk.id,
-            document_id=chunk.document_id,
-            filename=chunk.filename,
-            content=chunk.content,
-            page=chunk.page,
-            section=chunk.section,
-            score=float(score),
-        )
-        for chunk, score in ranked
-        if float(score) >= min_score
-    ][:top_k]
-
-    context, included = format_context(candidates, max_chars=max_context_chars)
-
-    if not included:
-        return RagAnswer(
-            question=cleaned,
-            answer=(
+            )
+        else:
+            answer = (
                 "No relevant content was found in your documents for that question. "
                 "Nothing has been guessed - try rephrasing, or upload a document that covers it."
-            ),
+            )
+        return RagAnswer(
+            question=cleaned,
+            answer=answer,
             sources=[],
-            searched_chunks=len(chunks),
+            searched_chunks=result.searched_chunks,
             grounded=False,
         )
+
+    context, included = format_context(candidates, max_chars=max_context_chars)
 
     prompt = build_grounded_answer_prompt(cleaned, context)
     completion = await generate_answer(
@@ -309,7 +256,7 @@ async def answer_question(
     logger.info(
         "rag_answered",
         extra=safe_extra(
-            searched_chunks=len(chunks),
+            searched_chunks=result.searched_chunks,
             context_chunks=len(included),
             context_chars=len(context),
             citations=len(included),
@@ -320,7 +267,7 @@ async def answer_question(
         question=cleaned,
         answer=completion.text,
         sources=included,
-        searched_chunks=len(chunks),
+        searched_chunks=result.searched_chunks,
         grounded=True,
         usage=completion.usage,
     )

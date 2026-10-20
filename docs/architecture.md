@@ -29,6 +29,7 @@ app/
     config.py    Typed, validated settings (single source of truth).
     logging.py   JSON logging + per-request correlation id.
     errors.py    AppError base: stable code + client-safe message.
+    vectors.py   Cosine similarity, used by the SQLite store.
   llm/
     factory.py   Provider -> chat model AND embedding model.
     service.py   Calls + response/error normalisation.
@@ -36,12 +37,16 @@ app/
     loaders.py   Per-format text extraction with provenance.
     chunking.py  Splitting that preserves page and section.
     ingest.py    Parse -> chunk -> embed -> store.
-    retriever.py Similarity search + grounded answering.
+    retriever.py Search + grounded answering, written against the store contract.
   database/
-    repositories.py  Owner-scoped documents and vectors.
+    repositories.py        The store contract + the SQLite implementation.
+    supabase_repository.py PostgREST-backed store; ranking runs in pgvector.
+    postgrest.py           Per-caller HTTP transport: token, headers, error mapping.
+    errors.py              Store failures with stable codes.
   security/
     file_validation.py  Extension, size and magic-byte checks.
-    identity.py         Who is asking (development stub until Phase 4).
+    identity.py         Who is asking: Supabase JWT, or the development stub.
+    supabase_auth.py    Local JWT verification against the project's JWKS.
   api/
     deps.py      Shared dependencies.
     health.py    GET / and GET /health.
@@ -124,10 +129,8 @@ recommendation.
 ## 7. What is intentionally NOT here yet
 
 - No agents, tools, or LangGraph workflow — Phases 5–6.
-- No hosted database; Phase 3 uses a local SQLite store so the pipeline is
-  runnable and testable with no external account. Supabase + pgvector is Phase 4.
-- No authentication — Phase 4 (Supabase Auth). Ownership is enforced now, but the
-  identity that drives it is not yet verified.
+- Uploaded files still live on local disk. Metadata and vectors are already in
+  Postgres; moving the files into Supabase Storage is the remaining Phase 4 step.
 - No OCR for scanned PDFs — they fail with a clear error instead.
 - No background worker; indexing runs inline in the request.
 - No rate limiting — Phase 7.
@@ -384,3 +387,76 @@ Stored vectors and query vectors must come from the same model. If
 naming both dimensions instead of comparing 768-dimensional vectors with
 1536-dimensional ones. That comparison is meaningless, and a silently wrong
 search result is worse than a clear error.
+
+## 14. Supabase: identity, isolation and the store (Phase 4)
+
+Three separate mechanisms answer three different questions, and keeping them
+apart is what makes the security argument checkable:
+
+| Question | Answered by | Where |
+| --- | --- | --- |
+| Who is this caller? | Signature check against the project JWKS | `security/supabase_auth.py` |
+| Which rows may they see? | Row Level Security | `supabase/migrations/0001_*.sql` |
+| Which rows did they ask for? | `owner_id` filters | `database/supabase_repository.py` |
+
+The third is a convenience and a second line of defence. It is the *second* one:
+if the application's filter and the policy ever disagreed, Postgres would win,
+and the result would be fewer rows rather than someone else's.
+
+### The repository is per-request, and that is load-bearing
+
+The SQLite store is a single object on `app.state`. It scopes every query by
+`owner_id`, so sharing it is safe.
+
+The Supabase store cannot be shared, because every query carries the caller's
+access token. `supabase-py` keeps the session on the client instance, so a
+process-wide client calling `.auth(token)` per request would let concurrent
+requests act as each other: A sets the token, B overwrites it, A's query runs as
+B. Instead `PostgrestClient` takes the token as an immutable constructor
+argument, and `get_repository` builds one per request around a shared
+connection pool.
+
+`get_repository` depends on `CurrentUserDep` even though it does not use the
+result. That is what makes identity resolve - and be verified - *before* a query
+is built.
+
+### Ranking moved out of the retriever
+
+Phase 3's `search()` loaded every chunk and compared it with NumPy. Over HTTP
+that would mean downloading the whole corpus for every question, which is
+precisely what pgvector exists to avoid.
+
+So the store contract grew `search_chunks(query_embedding, ...)` and dropped
+`fetch_chunks` from what a store must provide. The retriever embeds the query and
+hands the vector to the store; SQLite compares in NumPy, Postgres runs one
+`<=>` query against the HNSW index. `searched_chunks` reports the size of the
+corpus in scope, not how many vectors the index touched - the index is
+approximate, and claiming otherwise would imply an exactness search does not have.
+
+### `auto` is convenient, and one combination is refused
+
+`DOCUMENT_STORE=auto` picks Postgres when credentials are present, and
+`AUTH_BACKEND=auto` does the same for identity. They have to agree: a Postgres
+store with the development header stub would have no token to forward, and
+"fixing" that by falling back to the anon key would return empty results while
+looking like an empty account. Startup rejects the combination instead.
+
+### Two bugs that reading the code would not have found
+
+**`TRUNCATE` survived the migration.** Supabase grants `ALL` on new `public`
+tables to `authenticated`. The migration revoked it from `anon` but only *added*
+the four DML grants for `authenticated`, and `GRANT` does not remove what is
+already there. Postgres does not apply row security to `TRUNCATE`, so any signed-in
+user could have emptied every tenant's documents with every policy still in place.
+PostgREST never exposes `TRUNCATE`, so it was unreachable through the API - luck,
+not design. Fixed in `0003_tighten_privileges.sql`; `scripts/check_supabase.py`
+now audits it on every run.
+
+**The REST base URL was doubled.** `PostgrestClient` appended `/rest/v1` to a
+base that already ended in `/rest/v1`, producing `/rest/v1/rest/v1/documents`
+and a bare 404. Mock-transport tests matched on the path *suffix*, so they
+passed; only the live check failed. The wiring test now asserts the full URL.
+
+That is the general lesson: a mock proves the code does what you told it to. It
+does not prove the server agrees. `scripts/check_store.py` drives the real store
+with two signed-in users for exactly that reason.

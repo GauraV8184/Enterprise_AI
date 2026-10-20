@@ -63,10 +63,13 @@ Enterprize_AI/
 │   │   │   ├── ingest.py           # parse -> chunk -> embed -> store pipeline
 │   │   │   └── retriever.py        # similarity search + grounded answering
 │   │   ├── database/
-│   │   │   └── repositories.py     # owner-scoped documents + vectors
+│   │   │   ├── repositories.py        # store contract + SQLite implementation
+│   │   │   ├── supabase_repository.py # PostgREST store; search via pgvector
+│   │   │   └── postgrest.py           # per-caller transport + error mapping
 │   │   ├── security/
 │   │   │   ├── file_validation.py  # extension, size and magic-byte checks
-│   │   │   ├── identity.py         # who is asking (dev stub until Phase 4)
+│   │   │   ├── identity.py         # who is asking (Supabase JWT or dev stub)
+│   │   │   ├── supabase_auth.py    # JWT verification against the project JWKS
 │   │   │   └── errors.py           # auth error types
 │   │   ├── api/
 │   │   │   ├── deps.py             # shared dependencies
@@ -355,24 +358,35 @@ asking a model to answer from an empty context is how hallucinations start.
 
 ### Who owns what
 
-Phase 3 has no authentication yet (Supabase Auth lands in Phase 4). Every request
-resolves an owner, and **all storage queries filter on it in SQL**, so documents and
-vectors are tenant-scoped from the start. Two things to be clear about:
+With Supabase configured, every request carries a Supabase access token. The token
+is verified locally against the project's published keys, and then forwarded to
+Postgres on every query, where **Row Level Security** decides which rows exist.
+The `owner_id` filters in the application are a second line of defence rather than
+the only one.
+
+Without Supabase, a development stub is used:
 
 - `X-User-Id: <id>` names the caller for local multi-user testing. **This is not a
   security control** — anyone can send that header.
-- With `ENVIRONMENT=production` the document endpoints refuse to serve at all. They
-  fail closed rather than trusting an unverified header.
+- With `ENVIRONMENT=production` the API refuses to start without Supabase rather
+  than trusting an unverified header.
 
 Cross-user access returns **404, not 403**, so an id never confirms that someone
 else's document exists.
 
 ### Where the data lives
 
-Development uses SQLite at `data/app.db` with vectors stored as raw float32, and
-uploads under `data/uploads/`. Similarity search is a linear scan in NumPy: correct,
-and fine for thousands of chunks, but it is not an index. Phase 4 replaces this with
-Supabase Postgres + pgvector behind the same methods.
+`DOCUMENT_STORE=auto` (the default) uses Supabase Postgres when credentials are
+present, and the local SQLite store otherwise. Both sit behind the same contract,
+so the rest of the application does not know which is running:
+
+- **Supabase** — `documents` and `chunks` in Postgres with a `vector(768)` column
+  and an HNSW index. Similarity search is one SQL function call, so the vectors
+  never leave the database. Uploaded files still go to `data/uploads/`; moving
+  them into Supabase Storage is the remaining Phase 4 step.
+- **SQLite** — `data/app.db` with vectors as raw float32 and a NumPy cosine scan.
+  Correct, fast enough for thousands of chunks, and it needs no account, which is
+  why the offline test suite and the SQLite path still use it.
 
 ---
 
@@ -380,7 +394,7 @@ Supabase Postgres + pgvector behind the same methods.
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 226 passed, 5 skipped
+.\.venv\Scripts\python.exe -m pytest          # 294 passed, 5 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
@@ -391,8 +405,20 @@ The 5 skipped tests are **live** tests that need a running provider. They are op
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
 
-With a provider running the whole suite is green: **231 passed**, including real
+With a provider running the whole suite is green: **294 passed**, including real
 chat calls, real embeddings, and a full upload → retrieve → cite cycle.
+
+The Supabase side has its own live checks. Each creates throwaway users with the
+admin key, runs real requests, and deletes what it created:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\check_supabase.py   # credentials, schema, catalog audit
+.\.venv\Scripts\python.exe scripts\check_rls.py        # tenant isolation via the REST API
+.\.venv\Scripts\python.exe scripts\check_store.py      # the application's store, end to end
+```
+
+The service-role key is used by those scripts only. The application never reads
+it.
 
 The default suite never touches the network. It runs the real application code —
 real parsers, real SQLite store, real ranking — against an in-process fake chat
@@ -484,7 +510,7 @@ Responses include `request_id`, which also appears in the logs and in the
 | 1 | Foundation: FastAPI, config, logging, tests, docs | ✅ done |
 | 2 | LLM integration: chat, structured output, error handling | ✅ done |
 | 3 | RAG: upload, parse, chunk, embed, retrieve | ✅ done |
-| 4 | Supabase: schema, Auth, Storage, RLS, persistence | ⬜ |
+| 4 | Supabase: schema, Auth, Storage, RLS, persistence | 🚧 schema, Auth, RLS and persistence done; Storage pending |
 | 5 | LangGraph workflow + state | ⬜ |
 | 6 | Tools & specialist agents + report generation | ⬜ |
 | 7 | Security, audit logging, rate limits, SQL safety | ⬜ |

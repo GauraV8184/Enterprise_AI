@@ -7,10 +7,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from app.core.vectors import cosine_similarity_matrix
 from app.rag.loaders import (
     DocumentParseError,
     NoExtractableTextError,
-    cosine_similarity_matrix,
     load_document,
 )
 from tests.sample_files import (

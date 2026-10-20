@@ -352,6 +352,18 @@ class Settings(BaseSettings):
                 "ENVIRONMENT=production requires Supabase: without it there is no way to "
                 "authenticate callers, and refusing to serve is safer than trusting a header."
             )
+        if self.use_supabase_store and not self.use_supabase_auth:
+            # The Postgres store sends the caller's access token on every query and
+            # lets RLS decide which rows exist. The development stub supplies no
+            # token, so there would be nothing to send and every query would come
+            # back empty - or, worse, would be run with the anon key if someone
+            # "fixed" it that way. Refuse the combination instead.
+            raise ValueError(
+                "DOCUMENT_STORE=supabase requires AUTH_BACKEND=supabase. Every query is sent "
+                "with the caller's own access token so that Row Level Security decides what it "
+                "can see, and the development header stub supplies no token. Set "
+                "DOCUMENT_STORE=sqlite as well if you want to use the stub."
+            )
 
 
 @lru_cache

@@ -14,6 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,6 +25,7 @@ from app.core.logging import get_logger, request_id_ctx, safe_extra, setup_loggi
 from app.database.repositories import DocumentRepository
 from app.llm.errors import LlmNotConfiguredError
 from app.llm.factory import build_chat_model, build_embeddings
+from app.security.supabase_auth import SupabaseTokenVerifier
 
 logger = get_logger(__name__)
 
@@ -74,12 +76,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Build long-lived resources once at startup.
 
-    Building the client here (rather than per request) means one HTTP connection
+    Building clients here (rather than per request) means one HTTP connection
     pool, and it surfaces configuration problems in the startup logs. Note that
-    no network call happens yet - a bad API key is only discovered on first use,
-    which ``scripts/check_llm.py`` is designed to catch early.
+    no network call happens yet - a bad key is only discovered on first use,
+    which ``scripts/check_supabase.py`` and ``scripts/check_llm.py`` exist to
+    catch before that.
+
+    Raises:
+        ValueError: the configuration cannot work (see
+            :meth:`~app.core.config.Settings.validate_supabase_expectations`).
+            Refusing to start is better than serving requests that can only 503.
     """
     settings: Settings = app.state.settings
+
+    # Before anything is built: an explicit backend without credentials, or a
+    # Postgres store with no authenticated identity to forward, cannot serve.
+    settings.validate_supabase_expectations()
+
+    app.state.supabase_http = None
+    app.state.token_verifier = None
+
+    if settings.use_supabase_auth:
+        verifier = SupabaseTokenVerifier(settings)
+        app.state.token_verifier = verifier
+        logger.info("supabase_auth_ready", extra=safe_extra(issuer=verifier.issuer))
+
     if settings.llm_configured:
         try:
             app.state.chat_model = build_chat_model(settings)
@@ -98,7 +119,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # The document store is created even without an LLM: listing and deleting
     # already-uploaded documents must keep working while a provider is down.
-    app.state.repository = DocumentRepository(settings.database_path)
+    if settings.use_supabase_store:
+        # One pooled client shared by every request. The token is not held here -
+        # each request builds its own PostgrestClient around this pool.
+        app.state.supabase_http = httpx.Client(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+        app.state.repository = None
+        logger.info("document_store_ready", extra=safe_extra(backend="supabase"))
+    else:
+        app.state.repository = DocumentRepository(settings.database_path)
 
     if settings.embeddings_configured:
         try:
@@ -120,10 +151,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     yield
+
     # Connections here are opened per operation, so there is nothing to drain. The
     # references are dropped so nothing outlives the application instance.
+    if app.state.supabase_http is not None:
+        app.state.supabase_http.close()
+        app.state.supabase_http = None
     app.state.chat_model = None
     app.state.embeddings = None
+    app.state.token_verifier = None
 
 
 def _register_request_context(app: FastAPI) -> None:

@@ -27,7 +27,7 @@ from app.database.repositories import (
     STATUS_READY,
     ChunkRecord,
     DocumentRecord,
-    DocumentRepository,
+    DocumentStore,
     new_id,
 )
 from app.rag.chunking import chunk_blocks
@@ -69,7 +69,7 @@ def _safe_failure_message(exc: BaseException) -> str:
 
 def ingest_document(
     *,
-    repository: DocumentRepository,
+    repository: DocumentStore,
     embeddings: Embeddings,
     owner_id: str,
     document_id: str,
