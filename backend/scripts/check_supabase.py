@@ -59,6 +59,120 @@ def _rest_status(response: httpx.Response) -> str:
     return f"HTTP {response.status_code}"
 
 
+def _catalog_audit(settings: Settings, blockers: list[str]) -> None:
+    """Inspect the live catalog for the invariants RLS actually depends on.
+
+    None of this is answerable through the REST API. It will happily confirm that
+    a table exists and that a policy is present while the same table still grants
+    TRUNCATE to ``authenticated`` - and TRUNCATE ignores row security entirely, so
+    the policies would be decoration.
+
+    Optional by design: it needs ``SUPABASE_DB_URL``, which the application itself
+    never uses. Without one the rest of the diagnostic still runs.
+    """
+    if not settings.supabase_db_url:
+        _line("skipped", "SUPABASE_DB_URL not set (set it to audit privileges)")
+        return
+
+    try:
+        import psycopg
+    except ImportError:
+        _line("skipped", "psycopg not installed (pip install -r requirements-dev.txt)")
+        return
+
+    try:
+        connection = psycopg.connect(
+            settings.supabase_db_url.get_secret_value(), sslmode="require", connect_timeout=15
+        )
+    except Exception as exc:  # noqa: BLE001 - reported to the operator, not handled
+        _line("connection", f"FAILED {type(exc).__name__}")
+        blockers.append("Could not open the direct database connection for the catalog audit.")
+        return
+
+    with connection:
+        tables = connection.execute(
+            """
+            select c.relname, c.relrowsecurity
+            from pg_class c
+            join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'public' and c.relkind = 'r'
+              and c.relname in ('documents', 'chunks')
+            order by 1
+            """
+        ).fetchall()
+        if not tables:
+            blockers.append("The catalog audit did not find the documents/chunks tables.")
+            return
+        for name, enabled in tables:
+            _line(f"RLS on '{name}'", "enabled" if enabled else "DISABLED")
+            if not enabled:
+                blockers.append(f"Row Level Security is disabled on '{name}'.")
+
+        anon_grants = connection.execute(
+            """
+            select distinct privilege_type
+            from information_schema.role_table_grants
+            where table_schema = 'public' and table_name in ('documents', 'chunks')
+              and grantee = 'anon'
+            """
+        ).fetchall()
+        if anon_grants:
+            found = ", ".join(sorted(privilege for (privilege,) in anon_grants))
+            _line("anon privileges", f"FOUND {found}")
+            blockers.append(f"The public anon role holds privileges on documents/chunks: {found}.")
+        else:
+            _line("anon privileges", "none (correct)")
+
+        # TRUNCATE is the dangerous one: it is not filtered by row security.
+        extras = connection.execute(
+            """
+            select distinct privilege_type
+            from information_schema.role_table_grants
+            where table_schema = 'public' and table_name in ('documents', 'chunks')
+              and grantee = 'authenticated'
+              and privilege_type in ('TRUNCATE', 'TRIGGER', 'REFERENCES')
+            """
+        ).fetchall()
+        if extras:
+            found = ", ".join(sorted(privilege for (privilege,) in extras))
+            _line("authenticated extras", f"FOUND {found}")
+            blockers.append(
+                f"authenticated holds privileges that bypass RLS: {found}. Apply migration 0003."
+            )
+        else:
+            _line("authenticated extras", "none (correct)")
+
+        definers = connection.execute(
+            """
+            select p.proname
+            from pg_proc p
+            join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public'
+              and p.proname in ('match_document_chunks', 'embedding_dimensions')
+              and p.prosecdef
+            """
+        ).fetchall()
+        if definers:
+            names = ", ".join(name for (name,) in definers)
+            _line("SECURITY DEFINER", f"FOUND {names}")
+            blockers.append(f"{names} runs as its owner, so it bypasses RLS.")
+        else:
+            _line("search functions", "SECURITY INVOKER (correct)")
+
+        index = connection.execute(
+            """
+            select indexname from pg_indexes
+            where schemaname = 'public' and tablename = 'chunks'
+              and indexdef ilike '%using hnsw%'
+            """
+        ).fetchone()
+        _line("HNSW index", index[0] if index else "MISSING")
+        if index is None:
+            blockers.append(
+                "The HNSW index on chunks.embedding is missing; search will table-scan."
+            )
+
+
 def main() -> int:
     settings = Settings()
     blockers: list[str] = []
@@ -292,6 +406,11 @@ def main() -> int:
                     _line("GET /storage/v1/bucket", f"HTTP {buckets.status_code}")
             except httpx.HTTPError as exc:
                 _line("GET /storage/v1/bucket", f"FAILED {type(exc).__name__}")
+
+    # -- 5. Catalog audit --------------------------------------------------
+    print("\n5) Catalog audit (RLS, privileges, functions)")
+    print("-" * 62)
+    _catalog_audit(settings, blockers)
 
     print("\n" + "=" * 62)
     if blockers:

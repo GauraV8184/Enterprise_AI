@@ -4,15 +4,25 @@ Everything the application needs from Supabase lives in this folder: the databas
 schema, the vector index, the Row Level Security policies, and the private storage
 bucket for uploaded files.
 
-Two files, in order:
+Three files, in order:
 
 | File | Creates |
 | --- | --- |
 | `migrations/0001_documents_and_chunks.sql` | `documents`, `chunks` (+ pgvector, HNSW index, RLS policies, the similarity-search RPC) |
 | `migrations/0002_storage_bucket.sql` | the private `documents` bucket and its access policies |
+| `migrations/0003_tighten_privileges.sql` | revokes privileges that bypass RLS, drops a redundant index |
 
-Both are **idempotent** — re-running them is safe, so a failure halfway through
-can be fixed by simply running the file again.
+0003 exists because 0001 was wrong in a way that only the live catalog revealed:
+Supabase grants `ALL` on new `public` tables to `authenticated` by default, and
+0001's `GRANT SELECT, INSERT, UPDATE, DELETE` *added* to that rather than replacing
+it. The leftover `TRUNCATE` was the problem - Postgres does not apply row security
+to `TRUNCATE`, so it would have let any signed-in user empty every tenant's rows.
+PostgREST never exposes `TRUNCATE`, so it was not reachable through the API, but
+the privilege should not have been there at all. `scripts/check_supabase.py` now
+audits this (and the other RLS invariants) on every run.
+
+All files are **idempotent** — re-running them is safe, so a failure halfway
+through can be fixed by simply running the file again.
 
 ---
 
@@ -53,7 +63,7 @@ applied so later runs skip it.
 
 No password needs to leave the dashboard. Open **SQL Editor**, paste the whole of
 `0001_documents_and_chunks.sql`, press **Run**, then do the same with
-`0002_storage_bucket.sql`.
+`0002_storage_bucket.sql` and `0003_tighten_privileges.sql`.
 
 The trade-off is that there is no record of which files have been applied, so
 `scripts/apply_migrations.py --status` will report nothing. Re-running the files
