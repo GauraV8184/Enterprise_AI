@@ -23,6 +23,7 @@ from app.schemas.chat import (
     LlmStatusResponse,
     TokenUsage,
 )
+from app.security.identity import CurrentUserDep
 
 logger = get_logger(__name__)
 
@@ -30,8 +31,12 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 @router.get("/status", response_model=LlmStatusResponse, summary="LLM configuration status")
-def llm_status(settings: SettingsDep) -> LlmStatusResponse:
-    """Report whether the LLM is configured, without exposing any secret."""
+def llm_status(settings: SettingsDep, user: CurrentUserDep) -> LlmStatusResponse:
+    """Report whether the LLM is configured, without exposing any secret.
+
+    Authenticated like the generation endpoints: provider, model and timeout are
+    deployment details, and ``/health`` is the anonymous liveness probe.
+    """
     configured = settings.llm_configured
     return LlmStatusResponse(
         configured=configured,
@@ -48,8 +53,14 @@ async def chat(
     payload: ChatRequest,
     model: ChatModelDep,
     settings: SettingsDep,
+    user: CurrentUserDep,
 ) -> ChatResponse:
-    """Send the conversation to the configured model and return its reply."""
+    """Send the conversation to the configured model and return its reply.
+
+    Authentication is required even though no tenant data is read: without it an
+    anonymous caller can spend the deployment's provider quota. The identity is
+    not otherwise used - chat history is not persisted here.
+    """
     answer = await generate_answer(
         model,
         history=[message.model_dump() for message in payload.messages],
@@ -84,6 +95,7 @@ async def intent(
     payload: IntentRequest,
     model: ChatModelDep,
     settings: SettingsDep,
+    user: CurrentUserDep,
 ) -> IntentResponse:
     """Classify a request into a typed :class:`TaskIntent`.
 

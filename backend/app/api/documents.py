@@ -220,27 +220,24 @@ def delete_document(
 ) -> Response:
     """Delete a document, every vector derived from it, and the stored original.
 
+    The object is deleted before the rows. If storage refuses, the request fails
+    and nothing is deleted, so the caller can simply retry; deleting the rows
+    first would leave bytes that no row points at and nothing would retry.
+    Deleting an already-missing object is a no-op, which makes a retry after a
+    partial failure converge.
+
     Vectors are removed in the same transaction as the metadata, so a deleted
     document can never keep answering questions from orphaned chunks.
     """
     record = _require_document(repository, user.user_id, document_id)
 
-    repository.delete_document(owner_id=user.user_id, document_id=document_id)
+    file_store.delete(
+        owner_id=user.user_id,
+        document_id=record.id,
+        filename=record.filename,
+    )
 
-    try:
-        file_store.delete(
-            owner_id=user.user_id,
-            document_id=record.id,
-            filename=record.filename,
-        )
-    except AppError as exc:
-        # Losing the original is not a reason to fail the delete: the searchable
-        # data is already gone, which is what the user asked for. The key is
-        # deterministic, so an orphan can be found and removed later.
-        logger.warning(
-            "document_file_delete_failed",
-            extra=safe_extra(document_id=document_id, error=exc.code),
-        )
+    repository.delete_document(owner_id=user.user_id, document_id=document_id)
 
     logger.info("document_deleted", extra=safe_extra(document_id=document_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)

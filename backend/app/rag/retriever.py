@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
+from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import AppError
 from app.core.logging import get_logger, safe_extra
@@ -215,7 +216,11 @@ async def answer_question(
         raise EmptyQueryError("The question must not be blank.")
 
     query_vector = np.asarray(await embeddings.aembed_query(cleaned), dtype=np.float32)
-    result = repository.search_chunks(
+    # The store is synchronous: psycopg and PostgREST do blocking I/O. Calling it
+    # directly from this coroutine would stall the event loop for every other
+    # request for the duration of the query.
+    result = await run_in_threadpool(
+        repository.search_chunks,
         owner_id=owner_id,
         query_embedding=query_vector,
         top_k=top_k,

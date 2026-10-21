@@ -5,7 +5,7 @@ Answers the questions that decide how the integration should be built:
 * are the credentials valid, and is each sub-service reachable?
 * has the Phase 4 migration been applied yet?
 * which JWT signing scheme is in use (this decides how tokens are verified)?
-* does the storage bucket exist?
+* does the storage bucket exist, and is it private?
 
 It never prints a key. Run it from the ``backend`` directory:
 
@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx  # noqa: E402
 
 from app.core.config import Settings  # noqa: E402
+from app.security.supabase_auth import ASYMMETRIC_ALGORITHMS  # noqa: E402
 
 TIMEOUT = 20.0
 
@@ -362,21 +363,41 @@ def main() -> int:
         jwks_url = f"{settings.supabase_service_url('auth')}/.well-known/jwks.json"
         try:
             jwks = client.get(jwks_url, headers=anon_headers)
-            if jwks.status_code == 200:
+            if jwks.status_code != 200:
+                _line("JWKS endpoint", f"HTTP {jwks.status_code}")
+                blockers.append(
+                    f"The JWKS endpoint returned HTTP {jwks.status_code}. The API verifies "
+                    "tokens locally and cannot authenticate anyone without it."
+                )
+            else:
                 keys = jwks.json().get("keys") or []
+                asymmetric = [
+                    key
+                    for key in keys
+                    if key.get("alg") in ASYMMETRIC_ALGORITHMS
+                    or (not key.get("alg") and key.get("kty") in {"EC", "RSA", "OKP"})
+                ]
                 _line("JWKS keys published", len(keys))
-                if keys:
-                    _line("signature algorithm", keys[0].get("alg") or "(unspecified)")
+                if asymmetric:
+                    algorithms = sorted(
+                        {str(key.get("alg") or key.get("kty")) for key in asymmetric}
+                    )
+                    _line("signature algorithm", ", ".join(algorithms))
                     print("\n  Asymmetric signing is enabled, so access tokens can be verified")
                     print("  locally against the published public keys - no shared secret needed.")
                 else:
-                    print("\n  No public keys published: this project uses a shared HS256 secret.")
-                    print("  Local verification then needs SUPABASE_JWT_SECRET, or a fallback")
-                    print("  round-trip to the auth server per request.")
-            else:
-                _line("JWKS endpoint", f"HTTP {jwks.status_code}")
-        except httpx.HTTPError as exc:
+                    _line("signature algorithm", "none usable")
+                    blockers.append(
+                        "No asymmetric signing key is published. The API verifies tokens "
+                        "locally and accepts only asymmetric algorithms; enable JWT signing "
+                        "keys (ES256/RS256) in Supabase Auth."
+                    )
+        except (httpx.HTTPError, ValueError) as exc:
             _line("JWKS endpoint", f"FAILED {type(exc).__name__}")
+            blockers.append(
+                "The JWKS endpoint could not be reached or returned unreadable JSON. The API "
+                "verifies tokens locally and cannot authenticate anyone without it."
+            )
 
         # -- 4. Storage ---------------------------------------------------
         print("\n4) Storage")
@@ -389,23 +410,51 @@ def main() -> int:
                 buckets = client.get(
                     f"{settings.supabase_service_url('storage')}/bucket", headers=admin_headers
                 )
-                if buckets.status_code == 200:
-                    names = [item.get("name") for item in buckets.json()]
-                    _line("existing buckets", ", ".join(names) or "(none)")
-                    present = settings.supabase_documents_bucket in names
+                if buckets.status_code != 200:
+                    _line("GET /storage/v1/bucket", f"HTTP {buckets.status_code}")
+                    blockers.append(
+                        "The storage bucket list could not be read, so the documents bucket's "
+                        "existence and privacy could not be verified."
+                    )
+                else:
+                    items = buckets.json()
+                    names = [item.get("name") for item in items]
+                    _line("existing buckets", ", ".join(str(name) for name in names) or "(none)")
+                    bucket = next(
+                        (
+                            item
+                            for item in items
+                            if item.get("name") == settings.supabase_documents_bucket
+                        ),
+                        None,
+                    )
                     _line(
                         f"'{settings.supabase_documents_bucket}' bucket",
-                        "present" if present else "missing",
+                        "present" if bucket else "missing",
                     )
-                    if not present:
+                    if bucket is None:
                         blockers.append(
                             f"The '{settings.supabase_documents_bucket}' storage bucket does not "
                             "exist yet - apply the storage migration."
                         )
-                else:
-                    _line("GET /storage/v1/bucket", f"HTTP {buckets.status_code}")
-            except httpx.HTTPError as exc:
+                    elif bucket.get("public") is not False:
+                        # Storage exposes public buckets over an unauthenticated URL, so a
+                        # public bucket would make every uploaded document world-readable
+                        # regardless of the app's own authorization.
+                        _line("bucket is private", "NO - publicly readable")
+                        blockers.append(
+                            f"The '{settings.supabase_documents_bucket}' bucket is public. "
+                            "Uploaded documents would be readable by anyone; make it private "
+                            "in the storage migration or the Supabase dashboard."
+                        )
+                    else:
+                        _line("bucket is private", "yes")
+            except (httpx.HTTPError, ValueError) as exc:
                 _line("GET /storage/v1/bucket", f"FAILED {type(exc).__name__}")
+                blockers.append(
+                    "The storage bucket list could not be read, so the documents bucket's "
+                    "existence and privacy could not be verified."
+                )
 
     # -- 5. Catalog audit --------------------------------------------------
     print("\n5) Catalog audit (RLS, privileges, functions)")

@@ -194,7 +194,22 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             report.fail("A's object disappeared after B tried to delete it", repr(exc))
 
-        print("\n4) A deletes, and the object is gone")
+        print("\n4) The public anon key reaches nothing")
+        print("-" * 70)
+        # This must run while the object still exists: checking after A deletes it
+        # would report "denied" for a 404 that only means "gone".
+        anon_store = store_for(
+            settings,
+            settings.supabase_anon_key.get_secret_value(),
+            http,  # type: ignore[union-attr]
+        )
+        try:
+            anon_store.read(owner_id=alice_id, document_id=document_id, filename=FILENAME)
+            report.fail("the anon key read an object")
+        except (AccessDeniedError, FileStoreObjectMissingError):
+            report.ok("the anon key cannot read the object")
+
+        print("\n5) A deletes, and the object is gone")
         print("-" * 70)
         try:
             alice_store.delete(owner_id=alice_id, document_id=document_id, filename=FILENAME)
@@ -215,19 +230,6 @@ def main() -> int:
             report.ok("deleting it again is a no-op, not an error")
         except Exception as exc:  # noqa: BLE001
             report.fail("a repeated delete failed", repr(exc))
-
-        print("\n5) The public anon key reaches nothing")
-        print("-" * 70)
-        anon_store = store_for(
-            settings,
-            settings.supabase_anon_key.get_secret_value(),
-            http,  # type: ignore[union-attr]
-        )
-        try:
-            anon_store.read(owner_id=alice_id, document_id=document_id, filename=FILENAME)
-            report.fail("the anon key read an object")
-        except (AccessDeniedError, FileStoreObjectMissingError):
-            report.ok("the anon key cannot read the object")
 
     except Exception as exc:  # noqa: BLE001 - report, do not traceback at the user
         report.fail("the check could not finish", repr(exc))
@@ -250,7 +252,7 @@ def main() -> int:
                 client.delete_user(user_id)
                 print(f"  deleted user {label} ({user_id[:8]}...)")
             except Exception as exc:  # noqa: BLE001 - cleanup must not mask the result
-                print(f"  [warn] could not delete user {label}: {exc!r}")
+                report.fail(f"could not delete user {label}", repr(exc))
 
         for label, owner in (("A", alice_id), ("B", bob_id)):
             if not owner:

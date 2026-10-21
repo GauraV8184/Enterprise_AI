@@ -508,3 +508,24 @@ def test_a_storage_failure_leaves_a_visible_failed_document(
     assert record["status"] == "failed"
     assert record["chunk_count"] == 0
     assert record["error"]
+
+
+def test_a_storage_failure_during_delete_keeps_the_document(
+    rag_client: TestClient, documents_dir: Path
+) -> None:
+    """Delete bytes first: a storage outage must not leave an orphan behind.
+
+    If the rows went first and the object delete failed, the object would be
+    unreachable and nothing would ever retry it. Failing the request instead
+    leaves the document intact, so the caller can retry after recovery.
+    """
+    created = upload(rag_client, write_text_file(documents_dir)).json()
+
+    rag_client.app.state.file_store = _UnavailableFileStore()
+
+    response = rag_client.delete(f"/api/documents/{created['id']}")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "file_store_unavailable"
+    assert rag_client.get(f"/api/documents/{created['id']}").status_code == 200
+    assert rag_client.get("/api/documents").json()["total"] == 1

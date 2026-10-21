@@ -11,7 +11,8 @@ Two mechanisms live here, and which one runs is decided by configuration:
 * **A development stub**. The caller may name themselves with an ``X-User-Id``
   header, or fall back to ``settings.dev_user_id``. This is *not* a security
   control - anyone can send that header - and it exists only so the pipeline can
-  be exercised without an account. It is refused outright in production.
+  be exercised without an account. It is refused outside ``development`` and
+  ``test``.
 
 The stub is why this module's history is worth a sentence: ownership filtering
 was enforced in the data layer from the very first endpoint, before there was any
@@ -133,10 +134,11 @@ def get_current_user(request: Request) -> UserIdentity:
             )
         return verifier.verify(token)
 
-    if settings.is_production:
-        # Reachable only when production was configured without Supabase, which
-        # startup validation rejects. Kept as a second line of defence: serving an
-        # unverified header in production would be worse than not serving at all.
+    if not settings.allows_dev_auth:
+        # Reachable only when a deployed environment was configured without
+        # Supabase Auth, which startup validation rejects. Kept as a second line
+        # of defence: serving an unverified header outside development would be
+        # worse than not serving at all.
         raise AuthenticationNotAvailableError()
 
     user_id, source = _resolve_dev_user_id(settings, request)

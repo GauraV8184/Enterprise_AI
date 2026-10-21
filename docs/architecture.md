@@ -131,7 +131,9 @@ recommendation.
 - No agents, tools, or LangGraph workflow — Phases 5–6.
 - No download endpoint for original files, and no signed URLs. Uploads and deletes
   use Storage; reading an original back is only done internally for indexing.
-- No janitor for an object left behind if a delete fails after its rows are gone.
+- No janitor for the rare partial delete: if the object is removed and the row
+  delete then fails, the document remains listed without its original. A retry
+  converges; nothing repairs it in the background.
 - No OCR for scanned PDFs — they fail with a clear error instead.
 - No background worker; indexing runs inline in the request.
 - No rate limiting — Phase 7.
@@ -263,16 +265,28 @@ Added in Phase 3:
   path they were given, so paths are replaced with the display filename before
   the text reaches a response or a stored status.
 
-Not yet established: real authentication/authorization, RLS, SQL validation,
-rate limiting, audit logging (Phases 4–7).
+Added in Phase 4:
+- Real authentication: Supabase access tokens are verified locally against the
+  project JWKS; HS256 and `alg: none` are rejected. Every `/api/*` route requires
+  an identity, including the LLM-only chat endpoints.
+- Row Level Security is the boundary, and every Supabase query carries the
+  caller's token. The service-role key never serves user traffic.
+- The `documents` bucket is private, and its policies compare the first key
+  segment to `auth.uid()`. Uploads and deletes run as the caller.
+- The development `X-User-Id` stub is accepted only in `development` and `test`;
+  staging and production refuse to start without Supabase Auth.
 
-**The honest caveat on identity.** Phase 3 has no authentication. The acting user
-comes from an `X-User-Id` header, which anyone can set — it is *not* a security
-control. What it does buy is that the enforcement points are already correct and
-already tested: Phase 4 replaces *how the identity is derived* and nothing else
-moves. In `ENVIRONMENT=production` the module refuses to produce an identity at
-all, so an accidentally exposed deployment fails closed rather than serving one
-tenant's documents to another.
+Not yet established: rate limiting and audit logging (Phase 7), and validation
+for any model-generated SQL in later agent phases.
+
+**The identity caveat, and how Phase 4 closed it.** Phase 3 shipped without
+authentication: the acting user came from an `X-User-Id` header, which anyone can
+set — it was *not* a security control. What it bought was that the enforcement
+points were already correct and already tested, so Phase 4 only had to replace
+*how the identity is derived*; nothing else moved. Outside `development` and
+`test` - that is, in staging and production - the module now refuses to produce
+an identity at all, so an accidentally exposed deployment fails closed rather
+than serving one tenant's documents to another.
 
 ## 12. Testing approach
 
@@ -403,6 +417,17 @@ apart is what makes the security argument checkable:
 The third is a convenience and a second line of defence. It is the *second* one:
 if the application's filter and the policy ever disagreed, Postgres would win,
 and the result would be fewer rows rather than someone else's.
+
+Every `/api/*` route resolves `CurrentUserDep`, including the chat endpoints that
+read no tenant data. Leaving those anonymous would let anyone spend the
+deployment's provider quota; `/health` is the anonymous liveness probe. The
+development header stub is accepted only in `development` and `test`, and startup
+refuses to serve a deployed environment without Supabase Auth.
+
+Verification is local, so a cold cache costs one JWKS request. An unknown `kid` is
+unauthenticated input, so the cache refetches at most once per 30-second cooldown
+rather than once per request, and the fetch happens outside the state lock so
+cached keys keep verifying while a refresh is in flight.
 
 ### The repository is per-request, and that is load-bearing
 
@@ -549,11 +574,13 @@ If the object cannot be written, the document row is already there. It is marked
 deletable instead of sitting at `pending` forever. A failure to record that status
 is logged, not allowed to mask the original error.
 
-Deletion goes the other way: rows and vectors first, then the object. If the
-object delete fails, the request still succeeds - the searchable data is gone,
-which is what the caller asked for - and the key is deterministic, so an orphan
-can be found and removed later. The reverse order would leave a listed document
-whose original had already vanished.
+Deletion reverses the write order: the object is removed first, then the rows and
+vectors. If Storage is unavailable, the request fails and nothing has been deleted,
+so the caller can retry. Deleting the rows first would instead leave bytes that no
+row points at and that nothing would ever retry - a privacy leak with no owner. If
+the row delete fails after the object is gone, the document stays listed with its
+indexed chunks, and retrying the delete converges because deleting a missing
+object is a no-op.
 
 ### Four things only the live checks found
 

@@ -23,6 +23,11 @@ Usage
     # show what has been applied, connect to nothing, change nothing
     .\\.venv\\Scripts\\python.exe scripts\\apply_migrations.py --status
 
+An applied file that no longer matches its recorded checksum is treated as a
+failure (exit 1), not a warning: the database and the repository disagree, and
+silently ignoring that makes every later diagnosis unreliable. ``--force``
+re-runs it deliberately and updates the checksum.
+
 Exit codes: 0 = success, 1 = failure.
 """
 
@@ -136,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Applied migrations:")
             return _print_status(connection)
 
+        drift: list[str] = []
         for path in files:
             sql = path.read_text(encoding="utf-8")
             checksum = _checksum(sql)
@@ -149,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  WARN   {name}  was applied as {previous} but is now {checksum}.")
                 print("         The file changed after it was applied. Re-running it with")
                 print("         --force is safe for these idempotent migrations.")
+                drift.append(name)
                 continue
 
             verb = "re-run" if previous else "apply"
@@ -176,6 +183,16 @@ def main(argv: list[str] | None = None) -> int:
 
         print("\nApplied migrations:")
         _print_status(connection)
+
+        if drift:
+            print(f"\nRESULT: {len(drift)} applied migration(s) changed on disk:")
+            for name in drift:
+                print(f"  - {name}")
+            print(
+                "  The database no longer matches this repository. Restore the original "
+                "file(s), or re-run with --force if the change is intentional."
+            )
+            return 1
 
     print("\nRESULT: migrations applied. Verify with:")
     print("  .\\.venv\\Scripts\\python.exe scripts\\check_supabase.py")

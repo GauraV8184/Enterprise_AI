@@ -94,7 +94,7 @@ Enterprize_AI/
 │   │   ├── check_store.py          # the application's store, live
 │   │   ├── check_storage.py        # bucket policies, live
 │   │   └── apply_migrations.py     # apply supabase/migrations over psycopg
-│   ├── tests/                      # 329 offline tests + 5 opt-in live tests
+│   ├── tests/                      # 335 offline tests + 5 opt-in live tests
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   └── pyproject.toml
@@ -276,6 +276,12 @@ From the `backend` directory:
 | `POST /api/documents/ask` | answer a question from your documents, with citations |
 | `GET /docs` | interactive Swagger UI |
 
+All `/api/*` endpoints require a caller identity. In development the stub supplies
+the default user, so the examples below need no header. With Supabase Auth
+configured, send `Authorization: Bearer <access-token>`; anonymous callers get
+`401`. Outside the API, only `/` and `/health` are anonymous (the docs UI is too,
+where it is enabled).
+
 Example:
 
 ```powershell
@@ -377,8 +383,10 @@ Without Supabase, a development stub is used:
 
 - `X-User-Id: <id>` names the caller for local multi-user testing. **This is not a
   security control** — anyone can send that header.
-- With `ENVIRONMENT=production` the API refuses to start without Supabase rather
-  than trusting an unverified header.
+- The stub is accepted **only** in `ENVIRONMENT=development` and `test`. Staging
+  and production refuse to start without Supabase Auth rather than trust an
+  unverified header, so a deployed environment cannot be impersonated by adding
+  one.
 
 Cross-user access returns **404, not 403**, so an id never confirms that someone
 else's document exists.
@@ -411,7 +419,7 @@ and is not shared between instances.
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 329 passed, 5 skipped
+.\.venv\Scripts\python.exe -m pytest          # 335 passed, 5 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
@@ -422,7 +430,7 @@ The 5 skipped tests are **live** tests that need a running provider. They are op
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
 
-With a provider running the whole suite is green: **334 passed**, including real
+With a provider running the whole suite is green: **340 passed**, including real
 chat calls, real embeddings, and a full upload → retrieve → cite cycle.
 
 The Supabase side has its own live checks. Each creates throwaway users with the
@@ -483,8 +491,11 @@ Every expected failure has a stable `code` and an actionable message:
 | `no_extractable_text` | 422 | read cleanly but had no text (e.g. a scanned PDF) |
 | `document_not_found` | 404 | no such document, or it belongs to another user |
 | `embedding_dimension_mismatch` | 409 | `EMBEDDING_MODEL` changed after indexing — re-upload |
-| `not_authenticated` | 401 | an explicitly empty `X-User-Id` header |
-| `authentication_not_configured` | 503 | document endpoints used in `ENVIRONMENT=production` |
+| `not_authenticated` | 401 | no caller identity, or an explicitly empty `X-User-Id` in development |
+| `invalid_token` | 401 | malformed token, unsupported algorithm, or an unknown signing key |
+| `token_expired` | 401 | correctly signed, but past its `exp` |
+| `auth_unavailable` | 503 | JWKS unreachable and no cached keys to verify with |
+| `authentication_not_configured` | 503 | an `X-User-Id` request outside development/test with no Supabase Auth |
 
 Notes on the less obvious ones:
 

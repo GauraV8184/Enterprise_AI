@@ -41,6 +41,25 @@ def test_is_test_and_is_production_flags() -> None:
     assert Settings(_env_file=None, environment="production").is_production is True  # type: ignore[call-arg]
 
 
+def test_staging_refuses_the_development_identity_stub() -> None:
+    """Staging is deployed: an X-User-Id header there is an impersonation bug."""
+    settings = Settings(_env_file=None, environment="staging")  # type: ignore[call-arg]
+
+    with pytest.raises(ValueError, match="X-User-Id stub"):
+        settings.validate_supabase_expectations()
+
+
+def test_staging_with_supabase_auth_is_allowed() -> None:
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        environment="staging",
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="public-anon-key",
+    )
+
+    settings.validate_supabase_expectations()
+
+
 def test_get_settings_is_cached() -> None:
     get_settings.cache_clear()
     assert get_settings() is get_settings()

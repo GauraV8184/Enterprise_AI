@@ -136,10 +136,11 @@ class Client:
         return response.json()["access_token"]
 
     def delete_user(self, user_id: str) -> None:
-        self._http.delete(
+        response = self._http.delete(
             self._url("auth", f"/admin/users/{user_id}"),
             headers={"apikey": self._service, "Authorization": f"Bearer {self._service}"},
         )
+        response.raise_for_status()
 
     # -- data ------------------------------------------------------------
 
@@ -520,12 +521,18 @@ def run(settings: Settings) -> int:
                 if removed.status_code < 400:
                     print(f"  deleted storage object {object_path}")
                 else:
-                    print(f"  [warn] storage delete returned HTTP {removed.status_code}")
+                    report.fail(
+                        "could not delete the storage object during cleanup",
+                        f"HTTP {removed.status_code} {removed.text[:160]}",
+                    )
             except Exception as exc:  # noqa: BLE001 - cleanup must not mask the result
-                print(f"  [warn] could not delete storage object: {exc!r}")
+                report.fail("could not delete the storage object during cleanup", repr(exc))
         for label, user_id in users.items():
-            client.delete_user(user_id)
-            print(f"  deleted user {label} ({user_id[:8]}...) and its rows")
+            try:
+                client.delete_user(user_id)
+                print(f"  deleted user {label} ({user_id[:8]}...) and its rows")
+            except Exception as exc:  # noqa: BLE001 - cleanup must not mask the result
+                report.fail(f"could not delete user {label} during cleanup", repr(exc))
         client.close()
 
     return _finish(report)

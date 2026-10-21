@@ -296,6 +296,26 @@ def test_token_with_an_unknown_kid_is_rejected() -> None:
         verifier.verify(sign(make_claims(), keypair, headers={"kid": "invented"}))
 
 
+def test_repeated_unknown_kids_do_not_refetch_the_jwks() -> None:
+    """`kid` is unauthenticated input: it must not drive one fetch per request.
+
+    The first unknown id may be a rotation, so it earns a refetch. After that the
+    cooldown applies; otherwise anyone could turn a stream of bogus tokens into a
+    stream of JWKS requests.
+    """
+    keypair = make_keypair(kid="real")
+    verifier, fake = make_verifier(keypair)
+
+    verifier.verify(sign(make_claims(), keypair))
+    assert fake.calls == 1
+
+    for index in range(10):
+        with pytest.raises(InvalidTokenError):
+            verifier.verify(sign(make_claims(), keypair, headers={"kid": f"invented-{index}"}))
+
+    assert fake.calls == 2, "one refetch for the first unknown id, then no more"
+
+
 def test_token_without_kid_is_rejected_when_several_keys_are_published() -> None:
     """With more than one candidate the correct key is genuinely ambiguous."""
     first, second = make_keypair("kid-1"), make_keypair("kid-2")

@@ -220,6 +220,16 @@ class Settings(BaseSettings):
         return self.environment == "test"
 
     @property
+    def allows_dev_auth(self) -> bool:
+        """Whether the unauthenticated ``X-User-Id`` stub may be trusted.
+
+        Only the two local environments. Staging is a deployed environment with
+        real users; treating it like development would let anyone name themselves
+        into another tenant by sending a header.
+        """
+        return self.environment in {"development", "test"}
+
+    @property
     def llm_configured(self) -> bool:
         """True when enough settings exist to build an LLM client.
 
@@ -376,6 +386,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ENVIRONMENT=production requires Supabase: without it there is no way to "
                 "authenticate callers, and refusing to serve is safer than trusting a header."
+            )
+        if not self.allows_dev_auth and not self.use_supabase_auth:
+            # Staging is deployed and reachable by real users. The header stub is
+            # only a local convenience; accepting it there would let anyone pick
+            # their own user id and read another tenant's documents.
+            raise ValueError(
+                f"ENVIRONMENT={self.environment} requires Supabase Auth. The development "
+                "X-User-Id stub is only allowed in development and test; configure "
+                "SUPABASE_URL and SUPABASE_ANON_KEY (or set AUTH_BACKEND=supabase)."
             )
         if self.use_supabase_store and not self.use_supabase_auth:
             # The Postgres store sends the caller's access token on every query and

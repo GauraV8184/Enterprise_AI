@@ -430,6 +430,39 @@ async def test_model_is_not_called_when_nothing_is_retrieved(
     assert "No documents have been indexed yet" in result.answer
 
 
+async def test_the_store_call_runs_off_the_event_loop(
+    embeddings: HashingEmbeddings,
+) -> None:
+    """The stores block (SQLite, psycopg, PostgREST); the loop must stay free.
+
+    Without ``run_in_threadpool`` this coroutine would hold the event loop for
+    the whole query, stalling every other request handled by the worker.
+    """
+    import threading
+
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+
+    class RecordingStore:
+        def search_chunks(self, **_kwargs: object) -> ChunkSearchResult:
+            seen.append(threading.get_ident())
+            return ChunkSearchResult(matches=[], searched_chunks=0)
+
+    result = await answer_question(
+        RecordingStore(),  # type: ignore[arg-type]
+        embeddings,
+        FakeChatModel(replies=[]),
+        owner_id=ALICE,
+        question="anything",
+        top_k=3,
+        max_context_chars=8000,
+    )
+
+    assert result.grounded is False
+    assert seen, "the store was never called"
+    assert seen[0] != loop_thread
+
+
 async def test_no_match_above_threshold_explains_itself(
     corpus: DocumentRepository, embeddings: HashingEmbeddings
 ) -> None:

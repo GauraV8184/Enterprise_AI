@@ -79,6 +79,15 @@ DEFAULT_JWKS_TTL_SECONDS = 600.0
 #: when the cache is cold or a key has rotated.
 DEFAULT_JWKS_TIMEOUT_SECONDS = 10.0
 
+#: Minimum gap between refetches triggered by an *unknown* key id.
+#:
+#: A token's ``kid`` is unauthenticated input: the signature has not been checked
+#: yet when it is read. Without a floor, anyone can send a well-formed token with
+#: a random ``kid`` and force a JWKS fetch per request. Rotation still works - the
+#: first token naming a new key triggers a fetch - while a flood is limited to one
+#: fetch per window.
+DEFAULT_UNKNOWN_KID_COOLDOWN_SECONDS = 30.0
+
 #: Tolerance for clock drift between this machine and the auth server. Without
 #: it, a token minted a second in the future is rejected as "not yet valid".
 CLOCK_SKEW_LEEWAY_SECONDS = 30
@@ -97,13 +106,16 @@ class JwksCache:
 
     FastAPI runs synchronous endpoints in a threadpool, so several requests can
     verify tokens at once and a shared dict of keys is a race waiting to happen.
-    One lock around the refresh path is cheap here because the common case (a
-    warm cache) never takes it.
+    The state lock is held only for dictionary reads and writes, never across the
+    network: a slow JWKS endpoint must not stall verification of tokens whose keys
+    are already cached. Fetches are serialised by a second lock so one refresh
+    populates the cache for everyone waiting.
 
     Rotation is handled by refetching once when a token names a key id that is
     not in the cached set: the project may have signed the token after our last
-    fetch. A key id that is *still* unknown after a successful refetch is a
-    token we cannot vouch for, and it is rejected.
+    fetch. Refetches for unknown ids are rate-limited, because an unknown id is
+    attacker-controlled. A key id that is *still* unknown after a successful
+    refetch is a token we cannot vouch for, and it is rejected.
     """
 
     def __init__(
@@ -112,16 +124,23 @@ class JwksCache:
         *,
         ttl_seconds: float = DEFAULT_JWKS_TTL_SECONDS,
         timeout_seconds: float = DEFAULT_JWKS_TIMEOUT_SECONDS,
+        unknown_kid_cooldown_seconds: float = DEFAULT_UNKNOWN_KID_COOLDOWN_SECONDS,
         fetch: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._url = url
         self._ttl = ttl_seconds
         self._timeout = timeout_seconds
+        self._unknown_kid_cooldown = unknown_kid_cooldown_seconds
         # Injectable so tests can supply keys without a network call.
         self._fetch_override = fetch
+        # Guards ``_keys`` and ``_loaded_at``; never held across a fetch.
         self._lock = threading.Lock()
+        # Serialises fetches so a cold cache produces one request, not one per
+        # waiting thread.
+        self._refresh_lock = threading.Lock()
         self._keys: dict[str, _SigningKey] = {}
         self._loaded_at = 0.0
+        self._last_unknown_kid_refresh = float("-inf")
 
     # -- fetching ---------------------------------------------------------
 
@@ -180,8 +199,9 @@ class JwksCache:
         if not keys:
             raise AuthServiceUnavailableError("The project published no usable signing keys.")
 
-        self._keys = keys
-        self._loaded_at = time.monotonic()
+        with self._lock:
+            self._keys = keys
+            self._loaded_at = time.monotonic()
         logger.info("jwks_refreshed", extra=safe_extra(key_count=len(keys)))
 
     def _is_stale(self) -> bool:
@@ -198,41 +218,76 @@ class JwksCache:
         try:
             self._refresh()
         except AuthServiceUnavailableError:
-            if not self._keys:
+            with self._lock:
+                has_keys = bool(self._keys)
+            if not has_keys:
                 raise
             logger.warning(
                 "jwks_refresh_failed_using_cached_keys",
                 extra=safe_extra(url=self._url),
             )
 
+    def _refresh_once(self, *, force: bool) -> None:
+        """Fetch once, serialised across threads.
+
+        ``force`` distinguishes the two reasons to refresh: a stale cache (skip
+        if another thread already refreshed it) and an unknown key id (the cache
+        may be fresh but incomplete, so it must actually be refetched).
+        """
+        with self._refresh_lock:
+            if not force:
+                with self._lock:
+                    if not self._is_stale():
+                        return
+            self._refresh_gracefully()
+
+    def _claim_unknown_kid_refresh(self) -> bool:
+        """Reserve the next unknown-id refetch, or report that it is too soon."""
+        with self._lock:
+            now = time.monotonic()
+            if now - self._last_unknown_kid_refresh < self._unknown_kid_cooldown:
+                return False
+            self._last_unknown_kid_refresh = now
+            return True
+
+    def _only_key(self) -> _SigningKey | None:
+        """The sole published key, or ``None`` when the choice is ambiguous."""
+        if len(self._keys) == 1:
+            return next(iter(self._keys.values()))
+        return None
+
     # -- lookup -----------------------------------------------------------
 
     def get(self, kid: str | None) -> _SigningKey:
         with self._lock:
-            if self._is_stale():
-                self._refresh_gracefully()
+            stale = self._is_stale()
 
-            if kid is None:
-                # Older Supabase tokens omit `kid`. That is only unambiguous when
-                # the project publishes exactly one key.
-                if len(self._keys) == 1:
-                    return next(iter(self._keys.values()))
-                raise InvalidTokenError(
-                    "The token does not name a key, and the project publishes more than one."
-                )
+        if stale:
+            self._refresh_once(force=False)
 
-            key = self._keys.get(kid)
-            if key is None:
-                # Possibly rotated. Refetch once before giving up.
-                self._refresh_gracefully()
-                key = self._keys.get(kid)
+        with self._lock:
+            key = self._keys.get(kid) if kid is not None else self._only_key()
 
-            if key is None:
-                raise InvalidTokenError(
-                    "The token was signed with a key this project does not publish."
-                )
-
+        if key is not None:
             return key
+
+        if kid is None:
+            # Older Supabase tokens omit `kid`. That is only unambiguous when
+            # the project publishes exactly one key.
+            raise InvalidTokenError(
+                "The token does not name a key, and the project publishes more than one."
+            )
+
+        # Possibly rotated. Refetch before giving up, but at most once per
+        # cooldown: an unknown id is unauthenticated input.
+        if self._claim_unknown_kid_refresh():
+            self._refresh_once(force=True)
+            with self._lock:
+                key = self._keys.get(kid)
+            if key is not None:
+                return key
+
+        raise InvalidTokenError("The token was signed with a key this project does not publish.")
 
 
 class SupabaseTokenVerifier:

@@ -283,7 +283,7 @@ def run(settings: Settings, report: Report) -> None:
             try:
                 client.delete_user(user_id)
             except Exception as exc:  # noqa: BLE001 - cleanup must not mask the result
-                print(f"  [warn] could not delete throwaway user {user_id}: {exc!r}")
+                report.fail(f"could not delete throwaway user {user_id}", repr(exc))
         client.close()
 
 

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.llm.schemas import TaskIntent
+from app.main import create_app
 from tests.fakes import FakeChatModel, make_rate_limit_error
 
 # --------------------------------------------------------------------------
@@ -24,6 +25,42 @@ def test_status_never_leaks_the_api_key(llm_client: TestClient) -> None:
     response = llm_client.get("/api/chat/status")
     assert "sk-" not in response.text
     assert "api_key" not in response.text.lower().replace("openai_api_key", "")
+
+
+def test_llm_endpoints_require_authentication_when_supabase_auth_is_enabled() -> None:
+    """Anonymous callers must not be able to spend the deployment's LLM quota."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        environment="test",
+        debug=False,
+        log_json=False,
+        log_level="CRITICAL",
+        document_store="sqlite",
+        auth_backend="supabase",
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="anon-key-for-tests",
+        openai_api_key="test-key",
+    )
+    app = create_app(settings)
+
+    with TestClient(app) as api:
+        requests = (
+            api.get("/api/chat/status"),
+            api.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}),
+            api.post("/api/chat/intent", json={"text": "hello"}),
+        )
+
+        for response in requests:
+            assert response.status_code == 401
+            assert response.json()["code"] == "not_authenticated"
+
+        malformed = api.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": "Bearer not-a-jwt"},
+        )
+        assert malformed.status_code == 401
+        assert malformed.json()["code"] == "invalid_token"
 
 
 # --------------------------------------------------------------------------
