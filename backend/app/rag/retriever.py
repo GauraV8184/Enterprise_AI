@@ -32,7 +32,7 @@ from app.llm.service import TokenUsage, generate_answer
 
 logger = get_logger(__name__)
 
-DEFAULT_MIN_SCORE = 0.0
+DEFAULT_MIN_SCORE = 0.1
 
 SNIPPET_CHARS = 280
 

@@ -250,6 +250,7 @@ def test_count_chunks_reads_the_total_from_content_range() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["prefer"] == "count=exact"
         assert request.url.params["limit"] == "1"
+        assert "documents.status" not in request.url.params
         return httpx.Response(200, json=[], headers={"Content-Range": "*/42"}, request=request)
 
     assert make_repository(handler).count_chunks(owner_id=USER_ID) == 42
@@ -257,6 +258,7 @@ def test_count_chunks_reads_the_total_from_content_range() -> None:
 
 def test_search_uses_the_rpc_and_translates_the_result() -> None:
     payloads: list[dict[str, object]] = []
+    count_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/rpc/match_document_chunks"):
@@ -276,6 +278,7 @@ def test_search_uses_the_rpc_and_translates_the_result() -> None:
                     }
                 ],
             )
+        count_requests.append(request)
         return httpx.Response(200, json=[], headers={"Content-Range": "*/7"}, request=request)
 
     result = make_repository(handler).search_chunks(
@@ -291,6 +294,10 @@ def test_search_uses_the_rpc_and_translates_the_result() -> None:
     assert payload["match_count"] == 5
     assert payload["min_similarity"] == 0.25
     assert payload["filter_document_ids"] == [DOC_ID]
+
+    count_params = count_requests[0].url.params
+    assert count_params["documents.status"] == "eq.ready"
+    assert count_params["select"] == "id,documents!inner(id)"
 
     match = result.matches[0]
     assert match.id == "22222222222222222222222222222222"

@@ -43,6 +43,17 @@ class LlmAuthenticationError(LlmError):
     )
 
 
+class LlmRequestError(LlmError):
+    """The provider rejected the request itself rather than failing internally."""
+
+    status_code = 400
+    code = "llm_request_rejected"
+    public_message = (
+        "The language model provider rejected this request. Check the request and the "
+        "configured model, then try again."
+    )
+
+
 class LlmRateLimitError(LlmError):
     """Provider throttled us. Retrying later can help."""
 

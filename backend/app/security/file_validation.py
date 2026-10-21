@@ -22,7 +22,7 @@ from __future__ import annotations
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from app.core.errors import AppError
 
@@ -80,6 +80,11 @@ PDF_MAGIC = b"%PDF-"
 ZIP_MAGIC = b"PK\x03\x04"
 MAX_FILENAME_LENGTH = 255
 
+MAX_ZIP_ENTRIES = 10_000
+MAX_ZIP_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_ZIP_COMPRESSION_RATIO = 1000
+MIN_RATIO_CHECK_BYTES = 1024 * 1024
+
 
 def normalize_filename(raw: str | None) -> str:
     """Reduce a client-supplied filename to a safe display name.
@@ -136,17 +141,59 @@ def _looks_like_text(data: bytes) -> bool:
     return b"\x00" not in data[:8192]
 
 
+def _assert_zip_safety(archive: zipfile.ZipFile) -> None:
+    """Reject archives whose metadata describes an unreasonable expansion.
+
+    Reading a ZIP's central directory does not decompress it, so this check is
+    cheap. The limits bound the work a parser can be tricked into doing: a small
+    upload must not expand into an unbounded stream of XML or media.
+    """
+    entries = archive.infolist()
+    if len(entries) > MAX_ZIP_ENTRIES:
+        raise InvalidFileError(f"That archive contains more than {MAX_ZIP_ENTRIES} entries.")
+
+    total_uncompressed = 0
+    for entry in entries:
+        if entry.is_dir():
+            continue
+
+        total_uncompressed += entry.file_size
+        if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES:
+            raise InvalidFileError("That archive expands beyond the allowed size.")
+
+        if entry.file_size and entry.compress_size == 0:
+            raise InvalidFileError("That archive contains an invalid compressed entry.")
+
+        if (
+            entry.file_size >= MIN_RATIO_CHECK_BYTES
+            and entry.compress_size > 0
+            and entry.file_size / entry.compress_size > MAX_ZIP_COMPRESSION_RATIO
+        ):
+            raise InvalidFileError("That archive expands at an unsafe compression ratio.")
+
+
+def validate_archive_file(path: Path) -> None:
+    """Validate a stored ZIP-based document before handing it to a parser."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            _assert_zip_safety(archive)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise InvalidFileError("That document archive is damaged.") from exc
+
+
 def _looks_like_zip_member(data: bytes, member: str) -> bool:
-    """True when ``data`` is a ZIP archive containing ``member``.
+    """True when ``data`` is a safely bounded ZIP archive containing ``member``.
 
     Trusting the ``PK`` signature alone would accept any ZIP - a renamed ``.jar``
     or an archive bomb. Requiring the OOXML part that the parser needs means the
-    file is genuinely the type it claims.
+    file is genuinely the type it claims, and the expansion limits prevent the
+    parser from being the first component to discover that it is a bomb.
     """
     if not data.startswith(ZIP_MAGIC):
         return False
     try:
         with zipfile.ZipFile(BytesIO(data)) as archive:
+            _assert_zip_safety(archive)
             return member in archive.namelist()
     except (zipfile.BadZipFile, OSError):
         return False

@@ -232,7 +232,7 @@ class DocumentStore(Protocol):
         query_embedding: Sequence[float] | np.ndarray,
         top_k: int,
         document_ids: Sequence[str] | None = None,
-        min_score: float = 0.0,
+        min_score: float = 0.1,
     ) -> ChunkSearchResult: ...
 
 
@@ -478,12 +478,14 @@ class DocumentRepository:
         owner_id: str,
         document_ids: Sequence[str] | None = None,
         embeddings: bool = True,
+        ready_only: bool = False,
     ) -> tuple[list[StoredChunk], np.ndarray | None]:
         """Read an owner's chunks, optionally filtered to specific documents.
 
         Returns ``(chunks, matrix)`` where ``matrix`` is ``(n_chunks, dim)``
         float32, or ``None`` when ``embeddings=False``. One query plus one array
-        build - not one query per chunk.
+        build - not one query per chunk. ``ready_only`` restricts the result to
+        chunks whose parent document finished indexing.
         """
         columns = (
             "c.id, c.document_id, c.content, c.page, c.section, c.chunk_index, "
@@ -491,6 +493,10 @@ class DocumentRepository:
         )
         query = f"SELECT {columns} FROM chunks c JOIN documents d ON d.id = c.document_id WHERE c.owner_id = ?"
         params: list[object] = [owner_id]
+
+        if ready_only:
+            query += " AND d.status = ?"
+            params.append(STATUS_READY)
 
         if document_ids:
             placeholders = ", ".join("?" for _ in document_ids)
@@ -531,7 +537,7 @@ class DocumentRepository:
         query_embedding: Sequence[float] | np.ndarray,
         top_k: int,
         document_ids: Sequence[str] | None = None,
-        min_score: float = 0.0,
+        min_score: float = 0.1,
     ) -> ChunkSearchResult:
         """Rank this owner's chunks against ``query_embedding`` in NumPy.
 
@@ -541,7 +547,9 @@ class DocumentRepository:
 
         Ties are broken by chunk id so identical requests return identical order.
         """
-        chunks, matrix = self.fetch_chunks(owner_id=owner_id, document_ids=document_ids)
+        chunks, matrix = self.fetch_chunks(
+            owner_id=owner_id, document_ids=document_ids, ready_only=True
+        )
         if not chunks or matrix is None or matrix.size == 0:
             return ChunkSearchResult(matches=[], searched_chunks=len(chunks))
 

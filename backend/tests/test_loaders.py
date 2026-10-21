@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,16 @@ def test_pdf_text_is_actually_extracted(documents_dir: Path) -> None:
     assert "work remotely" in loaded.blocks[1].text
     assert "4,820,000" in loaded.blocks[2].text
     assert REVENUE_REPORT_TEXT.split()[1] in loaded.blocks[2].text
+
+
+def test_short_pdf_pages_are_kept(documents_dir: Path) -> None:
+    """A page with a few words still carries provenance and must not be dropped."""
+    path = write_pdf_file(documents_dir, pages=2, texts=["Tiny", REVENUE_REPORT_TEXT])
+
+    loaded = load_document(path)
+
+    assert [block.page for block in loaded.blocks] == [1, 2]
+    assert loaded.blocks[0].text == "Tiny"
 
 
 def test_scanned_pdf_is_reported_as_having_no_text(documents_dir: Path) -> None:
@@ -195,6 +206,38 @@ def test_docx_preserves_element_order(documents_dir: Path) -> None:
     assert table_index > prose_index
 
 
+def test_docx_content_controls_are_extracted(documents_dir: Path) -> None:
+    """``w:sdt`` (content controls) wrap real text; skipping them loses it."""
+    from docx import Document
+    from docx.oxml import OxmlElement
+
+    path = documents_dir / "content-control.docx"
+    document = Document()
+    document.add_paragraph("Before the control.")
+
+    sdt = OxmlElement("w:sdt")
+    sdt_content = OxmlElement("w:sdtContent")
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    text = OxmlElement("w:t")
+    text.text = "Inside the content control."
+    run.append(text)
+    paragraph.append(run)
+    sdt_content.append(paragraph)
+    sdt.append(sdt_content)
+    document.element.body.insert(1, sdt)
+
+    document.add_paragraph("After the control.")
+    document.save(path)
+
+    loaded = load_document(path)
+    combined = "\n".join(block.text for block in loaded.blocks)
+
+    assert "Before the control." in combined
+    assert "Inside the content control." in combined
+    assert "After the control." in combined
+
+
 def test_unsupported_extension_is_rejected_by_the_loader(documents_dir: Path) -> None:
     path = documents_dir / "archive.zip"
     path.write_bytes(b"PK\x03\x04")
@@ -202,6 +245,23 @@ def test_unsupported_extension_is_rejected_by_the_loader(documents_dir: Path) ->
     with pytest.raises(DocumentParseError) as excinfo:
         load_document(path)
     assert ".zip" in str(excinfo.value)
+
+
+def test_loader_rejects_an_expanding_docx_before_parsing(
+    documents_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defence in depth: a document that bypassed upload validation still cannot
+    make the parser expand an unbounded archive."""
+    import app.security.file_validation as file_validation
+
+    monkeypatch.setattr(file_validation, "MAX_ZIP_UNCOMPRESSED_BYTES", 1024)
+
+    path = documents_dir / "bomb.docx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", b"<w:document/>" + b"A" * 4096)
+
+    with pytest.raises(DocumentParseError, match="expand"):
+        load_document(path)
 
 
 def test_cosine_similarity_ranks_by_direction() -> None:

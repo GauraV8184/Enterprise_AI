@@ -308,7 +308,7 @@ class SupabaseDocumentRepository:
         query_embedding: Sequence[float] | np.ndarray,
         top_k: int,
         document_ids: Sequence[str] | None = None,
-        min_score: float = 0.0,
+        min_score: float = 0.1,
     ) -> ChunkSearchResult:
         """Rank the caller's chunks with pgvector.
 
@@ -330,7 +330,10 @@ class SupabaseDocumentRepository:
 
         if top_k <= 0:
             return ChunkSearchResult(
-                matches=[], searched_chunks=self._count_in_scope(owner_id=owner_id, scope=scope)
+                matches=[],
+                searched_chunks=self._count_in_scope(
+                    owner_id=owner_id, scope=scope, ready_only=True
+                ),
             )
 
         payload = {
@@ -350,11 +353,16 @@ class SupabaseDocumentRepository:
         )
         return ChunkSearchResult(
             matches=[_to_match(row) for row in rows],
-            searched_chunks=self._count_in_scope(owner_id=owner_id, scope=scope),
+            searched_chunks=self._count_in_scope(owner_id=owner_id, scope=scope, ready_only=True),
         )
 
-    def _count_in_scope(self, *, owner_id: str, scope: list[str] | None) -> int:
+    def _count_in_scope(
+        self, *, owner_id: str, scope: list[str] | None, ready_only: bool = False
+    ) -> int:
         params = {"select": "id", "owner_id": f"eq.{owner_id}", "limit": "1"}
+        if ready_only:
+            params["select"] = "id,documents!inner(id)"
+            params["documents.status"] = "eq.ready"
         if scope:
             params["document_id"] = f"in.({','.join(scope)})"
         response = self._client.get("/chunks", params=params, headers={"Prefer": "count=exact"})

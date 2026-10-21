@@ -259,6 +259,7 @@ def search_documents(
         query=payload.query,
         top_k=payload.top_k or settings.retrieval_top_k,
         document_ids=payload.document_ids,
+        min_score=settings.retrieval_min_score,
     )
 
     return SearchResponse(
@@ -298,6 +299,7 @@ async def ask_documents(
         top_k=payload.top_k or settings.retrieval_top_k,
         max_context_chars=settings.max_context_chars,
         document_ids=payload.document_ids,
+        min_score=settings.retrieval_min_score,
     )
 
     logger.info(

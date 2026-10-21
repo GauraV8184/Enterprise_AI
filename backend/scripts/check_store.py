@@ -31,7 +31,7 @@ import httpx  # noqa: E402
 import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_rls import Client, Report, unit_vector  # noqa: E402
+from check_rls import Client, Report, blend, unit_vector  # noqa: E402
 
 from app.core.config import Settings  # noqa: E402
 from app.core.logging import setup_logging  # noqa: E402
@@ -105,7 +105,7 @@ def run(settings: Settings, report: Report) -> None:
         repo_b = repository_for(settings, token_b, http)
 
         leave_vector = unit_vector(seed=11)
-        laptop_vector = unit_vector(seed=12)
+        laptop_vector = blend(leave_vector, unit_vector(seed=12), 0.5, 0.5)
 
         leave_doc = repo_a.create_document(
             owner_id=user_a,
@@ -184,6 +184,25 @@ def run(settings: Settings, report: Report) -> None:
         report.check(
             record is not None and record.chunk_count == 1,
             "chunk_count round-trips",
+        )
+
+        pending = repo_a.search_chunks(owner_id=user_a, query_embedding=leave_vector, top_k=5)
+        report.check(
+            len(pending.matches) == 1 and pending.matches[0].document_id == leave_doc.id,
+            "chunks of a document that is not ready are not searchable",
+            detail=str([(m.filename, round(m.score, 4)) for m in pending.matches]),
+        )
+        report.check(
+            pending.searched_chunks == 1,
+            "searched_chunks counts only fully indexed documents",
+        )
+
+        repo_a.update_status(
+            owner_id=user_a,
+            document_id=laptop_doc.id,
+            status="ready",
+            chunk_count=1,
+            mark_indexed=True,
         )
 
         listed = repo_a.list_documents(owner_id=user_a)

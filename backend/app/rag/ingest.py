@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from langchain_core.embeddings import Embeddings
 
 from app.core.errors import AppError
@@ -73,6 +74,23 @@ def _safe_failure_message(exc: BaseException) -> str:
     return "Indexing failed unexpectedly. See the server logs for details."
 
 
+def _validate_embedding_vectors(vectors: list[list[float]], expected_count: int) -> None:
+    """Reject provider output that cannot be stored as one vector column."""
+    if len(vectors) != expected_count:
+        raise DocumentProcessingError(
+            f"The embedding provider returned {len(vectors)} vectors for {expected_count} chunks."
+        )
+
+    dimensions = {int(np.asarray(vector, dtype=np.float32).reshape(-1).size) for vector in vectors}
+    if 0 in dimensions:
+        raise DocumentProcessingError("The embedding provider returned an empty vector.")
+    if len(dimensions) > 1:
+        widths = ", ".join(str(width) for width in sorted(dimensions))
+        raise DocumentProcessingError(
+            f"The embedding provider returned vectors with inconsistent dimensions ({widths})."
+        )
+
+
 def ingest_document(
     *,
     repository: DocumentStore,
@@ -116,10 +134,7 @@ def ingest_document(
             raise NoExtractableTextError(f"'{filename}' produced no indexable text.")
 
         vectors = embeddings.embed_documents([chunk.content for chunk in chunks])
-        if len(vectors) != len(chunks):
-            raise DocumentProcessingError(
-                f"The embedding provider returned {len(vectors)} vectors for {len(chunks)} chunks."
-            )
+        _validate_embedding_vectors(vectors, expected_count=len(chunks))
 
         repository.add_chunks(
             [

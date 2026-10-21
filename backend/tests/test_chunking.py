@@ -118,6 +118,35 @@ def test_unbroken_token_is_hard_split() -> None:
     assert all(chunk.char_count <= 400 for chunk in chunks)
 
 
+def test_table_header_is_repeated_in_every_split_chunk() -> None:
+    """A row without its column names is unreadable and unsearchable."""
+    header = "region | product | units | revenue"
+    rows = "\n".join(f"R{index} | Widget | {index} | {index * 10}" for index in range(1, 200))
+
+    chunks = chunk_blocks(
+        [TextBlock(text=f"{header}\n{rows}", table_header=header)],
+        chunk_size=200,
+        chunk_overlap=20,
+    )
+
+    assert len(chunks) > 1
+    assert all(chunk.content.startswith(header) for chunk in chunks)
+
+
+def test_table_chunks_stay_within_the_size_budget() -> None:
+    header = "name | value"
+    rows = "\n".join(f"row-{index} | {index}" for index in range(1, 100))
+
+    chunks = chunk_blocks(
+        [TextBlock(text=f"{header}\n{rows}", table_header=header)],
+        chunk_size=200,
+        chunk_overlap=20,
+    )
+
+    assert len(chunks) > 1
+    assert all(chunk.char_count <= 200 for chunk in chunks)
+
+
 def test_overlap_larger_than_chunk_size_is_rejected() -> None:
     """This combination never advances the window, so splitting would not terminate."""
     with pytest.raises(ValueError, match="chunk_overlap must be smaller"):

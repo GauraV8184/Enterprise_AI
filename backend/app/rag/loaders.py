@@ -25,15 +25,17 @@ from pathlib import Path
 
 from app.core.errors import AppError
 from app.core.logging import get_logger, safe_extra
-from app.security.file_validation import SUPPORTED_TYPES
+from app.security.file_validation import (
+    SUPPORTED_TYPES,
+    InvalidFileError,
+    validate_archive_file,
+)
 
 logger = get_logger(__name__)
 
 ROWS_PER_TABLE_BLOCK = 50
 
 MAX_TABLE_ROWS = 200_000
-
-MIN_PDF_TEXT_PER_PAGE = 8
 
 
 class DocumentParseError(AppError):
@@ -59,6 +61,7 @@ class TextBlock:
     text: str
     page: int | None = None
     section: str | None = None
+    table_header: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,7 +130,7 @@ def _load_pdf(path: Path) -> LoadedDocument:
         blocks: list[TextBlock] = []
         for page_index in range(document.page_count):
             text = document.load_page(page_index).get_text("text").strip()
-            if len(text) >= MIN_PDF_TEXT_PER_PAGE:
+            if text:
                 blocks.append(TextBlock(text=text, page=page_index + 1))
 
         return LoadedDocument(blocks=blocks, page_count=document.page_count)
@@ -146,11 +149,16 @@ def _iter_docx_blocks(document: object):
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 
-    for child in document.element.body.iterchildren():
-        if child.tag == qn("w:p"):
-            yield Paragraph(child, document)
-        elif child.tag == qn("w:tbl"):
-            yield Table(child, document)
+    def walk(parent):
+        for child in parent.iterchildren():
+            if child.tag == qn("w:p"):
+                yield Paragraph(child, document)
+            elif child.tag == qn("w:tbl"):
+                yield Table(child, document)
+            else:
+                yield from walk(child)
+
+    yield from walk(document.element.body)
 
 
 def _load_docx(path: Path) -> LoadedDocument:
@@ -267,6 +275,7 @@ def _table_to_blocks(
             TextBlock(
                 text="\n".join([header, *group]),
                 section=section,
+                table_header=header,
             )
         )
     return blocks
@@ -386,6 +395,12 @@ def load_document(path: Path, *, filename: str | None = None) -> LoadedDocument:
     if extension not in SUPPORTED_TYPES:
         supported = ", ".join(sorted(SUPPORTED_TYPES))
         raise DocumentParseError(f"'{extension}' files cannot be read. Supported: {supported}.")
+
+    if extension in {".docx", ".xlsx"}:
+        try:
+            validate_archive_file(path)
+        except InvalidFileError as exc:
+            raise DocumentParseError(exc.message) from exc
 
     parser = _PARSERS[extension]
     try:

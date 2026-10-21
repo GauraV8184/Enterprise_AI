@@ -66,6 +66,22 @@ def test_embedding_endpoint_is_independent_of_the_chat_endpoint() -> None:
     assert settings.effective_embedding_base_url == "http://192.168.1.50:11434/v1"
 
 
+def test_embedding_endpoint_falls_back_to_the_chat_base_url() -> None:
+    """A single gateway setting must configure both clients, not just chat."""
+    settings = _settings(
+        llm_provider="openai",
+        openai_api_key="sk-test",
+        openai_base_url="https://gateway.internal/v1",
+        embedding_provider="openai",
+        embedding_model="text-embedding-3-small",
+    )
+
+    assert settings.effective_embedding_base_url == "https://gateway.internal/v1"
+
+    model = build_embeddings(settings)
+    assert str(model.openai_api_base).rstrip("/") == "https://gateway.internal/v1"
+
+
 def test_local_models_skip_the_openai_token_length_check() -> None:
     """``check_embedding_ctx_length`` uses OpenAI's tokeniser and rejects other models."""
     model = build_embeddings(_settings(embedding_provider="ollama"))

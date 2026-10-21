@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.llm.schemas import TaskIntent
 
-ChatRole = Literal["system", "user", "assistant"]
+ChatRole = Literal["user", "assistant"]
 
 MAX_MESSAGES = 50
 MAX_CONTENT_CHARS = 8000
@@ -33,17 +33,19 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    """Body of ``POST /api/chat``."""
+    """Body of ``POST /api/chat``.
+
+    The system prompt is a server-side contract: callers may only supply user
+    and assistant turns. ``extra="forbid"`` makes that explicit instead of
+    silently ignoring a caller-supplied ``system_prompt`` field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     messages: list[ChatMessage] = Field(
         min_length=1,
         max_length=MAX_MESSAGES,
-        description="Conversation so far, oldest first. The last message is normally the user's.",
-    )
-    system_prompt: str | None = Field(
-        default=None,
-        max_length=MAX_CONTENT_CHARS,
-        description="Optional override for the built-in system prompt.",
+        description="Conversation so far, oldest first, using only user/assistant roles.",
     )
     temperature: float | None = Field(
         default=None,
@@ -51,12 +53,6 @@ class ChatRequest(BaseModel):
         le=2.0,
         description="Optional per-request sampling temperature.",
     )
-
-    @model_validator(mode="after")
-    def _require_user_message(self) -> ChatRequest:
-        if not any(message.role != "system" for message in self.messages):
-            raise ValueError("At least one non-system message is required.")
-        return self
 
 
 class TokenUsage(BaseModel):

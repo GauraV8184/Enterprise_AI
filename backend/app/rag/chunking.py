@@ -86,13 +86,29 @@ def chunk_blocks(
         if not text:
             continue
 
-        for piece in splitter.split_text(text):
+        header = (block.table_header or "").strip()
+        if header and text.startswith(header):
+            body = text[len(header) :].lstrip("\n")
+        else:
+            body = text
+
+        block_splitter = splitter
+        if header:
+            body_budget = chunk_size - len(header) - 1
+            if body_budget > 0:
+                block_splitter = build_splitter(
+                    chunk_size=body_budget,
+                    chunk_overlap=min(chunk_overlap, body_budget - 1),
+                )
+
+        for piece in block_splitter.split_text(body if header else text):
             cleaned = piece.strip()
             if not cleaned:
                 continue
+            content = f"{header}\n{cleaned}" if header else cleaned
             chunks.append(
                 PreparedChunk(
-                    content=cleaned,
+                    content=content,
                     page=block.page,
                     section=block.section,
                 )

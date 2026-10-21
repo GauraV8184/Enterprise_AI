@@ -12,6 +12,7 @@ from app.llm.errors import (
     LlmProviderError,
     LlmQuotaExhaustedError,
     LlmRateLimitError,
+    LlmRequestError,
     LlmStructuredOutputError,
     LlmTimeoutError,
 )
@@ -142,6 +143,7 @@ async def test_system_prompt_reaches_the_model() -> None:
         (make_timeout_error, LlmTimeoutError),
         (make_connection_error, LlmConnectionError),
         (make_status_error, LlmProviderError),
+        (lambda: make_status_error(400), LlmRequestError),
     ],
 )
 async def test_provider_errors_are_translated(builder, expected) -> None:
@@ -170,6 +172,14 @@ def test_map_exception_records_provider_status_but_not_body() -> None:
     error = map_exception(make_status_error(503))
     assert error.details["provider_status"] == 503
     assert "service unavailable" not in error.message
+
+
+def test_map_exception_maps_4xx_to_a_client_error() -> None:
+    error = map_exception(make_status_error(422))
+    assert isinstance(error, LlmRequestError)
+    assert error.status_code == 400
+    assert error.code == "llm_request_rejected"
+    assert error.details["provider_status"] == 422
 
 
 def test_exhausted_quota_is_not_reported_as_a_rate_limit() -> None:

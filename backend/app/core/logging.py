@@ -51,20 +51,41 @@ _SENSITIVE_WORDS = frozenset(
         "cookie",
         "signature",
         "private",
+        "dsn",
     }
 )
 
 _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(\b(?:authorization|api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|"
+    r"token|password|passwd|secret|client[-_]?secret|cookie|set-cookie)\b\s*[:=]\s*)"
+    r"([\"']?)([^\"'\s,;]+)([\"']?)"
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_OPENAI_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+
 
 def is_sensitive_key(name: str) -> bool:
     """True when a field name looks like it holds a secret."""
-    words = [word for word in _WORD_SPLIT.split(str(name).lower()) if word]
-    return any(word in _SENSITIVE_WORDS for word in words)
+    normalized = str(name).lower()
+    words = [word for word in _WORD_SPLIT.split(normalized) if word]
+    if any(word in _SENSITIVE_WORDS for word in words):
+        return True
+    return any(marker in normalized for marker in ("db_url", "database_url", "connection_string"))
+
+
+def redact_text(text: str) -> str:
+    """Redact common credential shapes embedded in free-form log text."""
+    redacted = _BEARER_TOKEN.sub("Bearer ***REDACTED***", text)
+    redacted = _SECRET_ASSIGNMENT.sub(r"\1\2***REDACTED***\4", redacted)
+    redacted = _OPENAI_KEY.sub("***REDACTED***", redacted)
+    return _JWT.sub("***REDACTED***", redacted)
 
 
 def redact_secrets(value: Any) -> Any:
-    """Recursively redact values held under suspicious-looking keys."""
+    """Recursively redact values held under suspicious keys and in strings."""
     if isinstance(value, dict):
         return {
             k: ("***REDACTED***" if is_sensitive_key(str(k)) else redact_secrets(v))
@@ -72,6 +93,8 @@ def redact_secrets(value: Any) -> Any:
         }
     if isinstance(value, (list, tuple)):
         return [redact_secrets(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
     return value
 
 
@@ -103,8 +126,8 @@ class JsonFormatter(logging.Formatter):
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
-            "request_id": request_id_ctx.get(),
+            "message": redact_text(record.getMessage()),
+            "request_id": redact_text(request_id_ctx.get()),
         }
 
         for key, value in record.__dict__.items():
@@ -112,7 +135,7 @@ class JsonFormatter(logging.Formatter):
                 payload[key] = redact_secrets(value)
 
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_text(self.formatException(record.exc_info))
 
         return json.dumps(payload, default=str, ensure_ascii=False)
 
@@ -124,10 +147,10 @@ class HumanFormatter(logging.Formatter):
         base = (
             f"{datetime.fromtimestamp(record.created, tz=UTC).strftime('%H:%M:%S')} "
             f"{record.levelname:<8} {record.name} "
-            f"[{request_id_ctx.get()}] {record.getMessage()}"
+            f"[{redact_text(request_id_ctx.get())}] {redact_text(record.getMessage())}"
         )
         if record.exc_info:
-            base += "\n" + self.formatException(record.exc_info)
+            base += "\n" + redact_text(self.formatException(record.exc_info))
         return base
 
 

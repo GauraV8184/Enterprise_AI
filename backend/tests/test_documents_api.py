@@ -15,7 +15,7 @@ from app.core.config import Settings
 from app.main import create_app
 from app.storage.errors import FileStoreUnavailableError
 from tests.conftest import upload
-from tests.fakes import FakeChatModel
+from tests.fakes import FakeChatModel, HashingEmbeddings
 from tests.sample_files import (
     LAPTOP_SECURITY_TEXT,
     REVENUE_REPORT_TEXT,
@@ -72,6 +72,41 @@ def test_upload_docx_is_indexed(rag_client: TestClient, documents_dir: Path) -> 
     response = upload(rag_client, write_docx_file(documents_dir))
     assert response.status_code == 201
     assert response.json()["chunk_count"] >= 1
+
+
+class _InconsistentDimensions(HashingEmbeddings):
+    """A provider that changes vector width half-way through one document."""
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        vectors = super().embed_documents(texts)
+        if len(vectors) > 1:
+            vectors[1] = vectors[1][:8]
+        return vectors
+
+
+def test_inconsistent_embedding_dimensions_fail_the_upload_cleanly(
+    rag_client: TestClient, documents_dir: Path
+) -> None:
+    path = documents_dir / "long.txt"
+    path.write_text(" ".join(f"token-{index}" for index in range(500)), encoding="utf-8")
+
+    rag_client.app.state.embeddings = _InconsistentDimensions()
+
+    response = upload(rag_client, path)
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["code"] == "document_processing_failed"
+    assert body["details"]["document_id"]
+    assert body["details"]["status"] == "failed"
+
+    created = rag_client.get(f"/api/documents/{body['details']['document_id']}").json()
+    assert created["status"] == "failed"
+    assert created["chunk_count"] == 0
+
+    searched = rag_client.post("/api/documents/search", json={"query": "token"}).json()
+    assert searched["matches"] == []
+    assert searched["searched_chunks"] == 0
 
 
 def test_uploaded_document_is_listed(rag_client: TestClient, documents_dir: Path) -> None:

@@ -5,9 +5,10 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from app.llm.schemas import TaskIntent
 from app.main import create_app
-from tests.fakes import FakeChatModel, make_rate_limit_error
+from tests.fakes import FakeChatModel, make_rate_limit_error, make_status_error
 
 
 def test_status_reports_not_configured(client: TestClient) -> None:
@@ -103,12 +104,35 @@ def test_chat_sends_the_whole_conversation(
     assert "first" in contents and "second" in contents and "third" in contents
 
 
-def test_chat_honours_custom_system_prompt(llm_client: TestClient, fake_model) -> None:
-    llm_client.post(
+def test_chat_uses_the_server_side_system_prompt(
+    llm_client: TestClient, fake_model: FakeChatModel
+) -> None:
+    llm_client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]})
+    assert fake_model.received[0][0].content == DEFAULT_SYSTEM_PROMPT
+
+
+def test_caller_supplied_system_prompt_is_rejected(
+    llm_client: TestClient, fake_model: FakeChatModel
+) -> None:
+    response = llm_client.post(
         "/api/chat",
         json={"messages": [{"role": "user", "content": "Hi"}], "system_prompt": "Be brief."},
     )
-    assert fake_model.received[0][0].content == "Be brief."
+    assert response.status_code == 422
+    assert fake_model.received == []
+
+
+def test_system_role_in_history_is_rejected(llm_client: TestClient) -> None:
+    response = llm_client.post(
+        "/api/chat",
+        json={
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hi"},
+            ]
+        },
+    )
+    assert response.status_code == 422
 
 
 def test_chat_passes_temperature_override(llm_client: TestClient, fake_model) -> None:
@@ -135,6 +159,18 @@ def test_provider_rate_limit_becomes_429(llm_client: TestClient, fake_model) -> 
     response = llm_client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]})
     assert response.status_code == 429
     assert response.json()["code"] == "llm_rate_limited"
+
+
+def test_provider_client_error_is_not_reported_as_a_gateway_error(
+    llm_client: TestClient, fake_model
+) -> None:
+    fake_model.error = make_status_error(400)
+    response = llm_client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "llm_request_rejected"
+    assert body["details"]["provider_status"] == 400
 
 
 def test_exhausted_credits_return_402_with_billing_advice(

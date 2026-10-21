@@ -45,6 +45,7 @@ from app.llm.errors import (
     LlmProviderError,
     LlmQuotaExhaustedError,
     LlmRateLimitError,
+    LlmRequestError,
     LlmStructuredOutputError,
     LlmTimeoutError,
 )
@@ -230,6 +231,8 @@ def map_exception(exc: BaseException) -> AppError:
     if isinstance(exc, OutputParserException):
         return LlmStructuredOutputError()
     if isinstance(exc, APIStatusError):
+        if 400 <= exc.status_code < 500:
+            return LlmRequestError(details={"provider_status": exc.status_code})
         return LlmProviderError(details={"provider_status": exc.status_code})
     if isinstance(exc, APIError):
         return LlmProviderError()

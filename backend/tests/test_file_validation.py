@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from app.security.file_validation import (
 )
 from tests.sample_files import (
     write_csv_file,
+    write_docx_file,
     write_fake_docx,
     write_fake_pdf,
     write_pdf_file,
@@ -107,6 +109,7 @@ def test_genuine_files_pass_validation(documents_dir: Path) -> None:
         write_csv_file(documents_dir),
         write_xlsx_file(documents_dir),
         write_pdf_file(documents_dir),
+        write_docx_file(documents_dir),
     ):
         file_type = validate_upload(
             filename=path.name, data=path.read_bytes(), max_bytes=10 * ONE_MB
@@ -144,3 +147,73 @@ def test_text_with_high_bytes_is_still_accepted() -> None:
         validate_upload(filename="a.txt", data=b"caf\xe9 na\xefve", max_bytes=ONE_MB).extension
         == ".txt"
     )
+
+
+def _write_docx_shaped_zip(directory: Path, name: str, entries: dict[str, bytes]) -> Path:
+    path = directory / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for entry_name, payload in entries.items():
+            archive.writestr(entry_name, payload)
+    return path
+
+
+def test_docx_that_expands_beyond_the_size_cap_is_rejected(
+    documents_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.security.file_validation as file_validation
+
+    monkeypatch.setattr(file_validation, "MAX_ZIP_UNCOMPRESSED_BYTES", 1024)
+    path = _write_docx_shaped_zip(
+        documents_dir,
+        "oversized.docx",
+        {"word/document.xml": b"<w:document/>" + b"A" * 8192},
+    )
+
+    with pytest.raises(InvalidFileError, match="expand"):
+        validate_upload(filename=path.name, data=path.read_bytes(), max_bytes=10 * ONE_MB)
+
+
+def test_docx_with_too_many_entries_is_rejected(
+    documents_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.security.file_validation as file_validation
+
+    monkeypatch.setattr(file_validation, "MAX_ZIP_ENTRIES", 3)
+    path = _write_docx_shaped_zip(
+        documents_dir,
+        "many-entries.docx",
+        {
+            "word/document.xml": b"<w:document/>",
+            "docProps/app.xml": b"<app/>",
+            "docProps/core.xml": b"<core/>",
+            "docProps/custom.xml": b"<custom/>",
+        },
+    )
+
+    with pytest.raises(InvalidFileError, match="entries"):
+        validate_upload(filename=path.name, data=path.read_bytes(), max_bytes=10 * ONE_MB)
+
+
+def test_docx_with_an_absurd_compression_ratio_is_rejected(
+    documents_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.security.file_validation as file_validation
+
+    monkeypatch.setattr(file_validation, "MIN_RATIO_CHECK_BYTES", 1024)
+    monkeypatch.setattr(file_validation, "MAX_ZIP_COMPRESSION_RATIO", 10)
+    path = _write_docx_shaped_zip(
+        documents_dir,
+        "ratio.docx",
+        {"word/document.xml": b"<w:document/>" + b"A" * 4096},
+    )
+
+    with pytest.raises(InvalidFileError, match="compression ratio"):
+        validate_upload(filename=path.name, data=path.read_bytes(), max_bytes=10 * ONE_MB)
+
+
+def test_a_real_docx_passes_the_zip_safety_checks(documents_dir: Path) -> None:
+    path = write_docx_file(documents_dir)
+
+    file_type = validate_upload(filename=path.name, data=path.read_bytes(), max_bytes=10 * ONE_MB)
+
+    assert file_type.extension == ".docx"

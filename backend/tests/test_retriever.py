@@ -22,6 +22,7 @@ from app.database.repositories import (
     new_id,
 )
 from app.rag.retriever import (
+    DEFAULT_MIN_SCORE,
     answer_question,
     format_context,
     search,
@@ -141,7 +142,7 @@ def test_page_and_section_travel_with_the_match(
 
 
 def test_top_k_limits_results(corpus: DocumentRepository, embeddings: HashingEmbeddings) -> None:
-    result = search(corpus, embeddings, owner_id=ALICE, query="report", top_k=2)
+    result = search(corpus, embeddings, owner_id=ALICE, query="revenue leave", top_k=2)
     assert len(result.matches) == 2
 
 
@@ -221,6 +222,8 @@ def test_search_delegates_ranking_to_the_store() -> None:
 
     assert store.calls[0]["top_k"] == 2
     assert store.calls[0]["owner_id"] == ALICE
+    assert store.calls[0]["min_score"] == DEFAULT_MIN_SCORE
+    assert DEFAULT_MIN_SCORE > 0.0
     assert result.searched_chunks == 4
     assert result.matches[0].chunk_id == "c1"
     assert result.matches[0].citation == "handbook.pdf, page 4 (Leave)"

@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Environment = Literal["development", "staging", "production", "test"]
@@ -47,11 +47,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Enterprise AI Intelligence Platform"
-    app_version: str = "0.1.0"
+    app_name: str = Field(default="Enterprise AI Intelligence Platform", min_length=1)
+    app_version: str = Field(default="0.1.0", min_length=1)
     environment: Environment = "development"
     debug: bool = False
-    api_prefix: str = "/api"
+    api_prefix: str = Field(default="/api", min_length=1, pattern=r"^/")
 
     log_level: LogLevel = "INFO"
     log_json: bool = True
@@ -66,34 +66,35 @@ class Settings(BaseSettings):
 
     openai_base_url: str | None = None
 
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = Field(default="gpt-4o-mini", min_length=1)
 
-    llm_temperature: float = 0.0
-    llm_max_tokens: int | None = None
-    llm_timeout_seconds: float = 60.0
-    llm_max_retries: int = 2
+    llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    llm_max_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+    llm_timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
+    llm_max_retries: int = Field(default=2, ge=0, le=10)
 
     embedding_provider: Literal["ollama", "openai"] = "ollama"
-    embedding_model: str = "nomic-embed-text"
-    embedding_batch_size: int = 64
-    embedding_timeout_seconds: float = 120.0
+    embedding_model: str = Field(default="nomic-embed-text", min_length=1)
+    embedding_batch_size: int = Field(default=64, ge=1, le=2048)
+    embedding_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
     embedding_base_url: str | None = None
 
     data_dir: Path = Field(default_factory=lambda: _REPO_ROOT / "data")
-    max_upload_mb: int = 25
+    max_upload_mb: int = Field(default=25, ge=1, le=100)
 
-    chunk_size: int = 1000
-    chunk_overlap: int = 150
-    retrieval_top_k: int = 6
-    max_context_chars: int = 12000
+    chunk_size: int = Field(default=1000, ge=50, le=8000)
+    chunk_overlap: int = Field(default=150, ge=0, le=7999)
+    retrieval_top_k: int = Field(default=6, ge=1, le=25)
+    retrieval_min_score: float = Field(default=0.1, ge=-1.0, le=1.0)
+    max_context_chars: int = Field(default=12000, ge=100, le=100_000)
 
-    dev_user_id: str = "dev-user"
+    dev_user_id: str = Field(default="dev-user", min_length=1)
 
     supabase_url: str | None = None
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None
-    supabase_documents_bucket: str = "documents"
-    storage_timeout_seconds: float = 120.0
+    supabase_documents_bucket: str = Field(default="documents", min_length=1)
+    storage_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
 
     supabase_db_url: SecretStr | None = None
 
@@ -120,13 +121,36 @@ class Settings(BaseSettings):
             return [item.strip() for item in text.split(",") if item.strip()]
         return value
 
-    @field_validator("openai_api_key", "openai_base_url", mode="before")
+    @field_validator("openai_api_key", "openai_base_url", "embedding_base_url", mode="before")
     @classmethod
     def _blank_string_to_none(cls, value: object) -> object:
         """Treat ``KEY=`` (empty) in .env as "not set" rather than ""."""
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("data_dir", mode="after")
+    @classmethod
+    def _anchor_data_dir(cls, value: Path) -> Path:
+        """Resolve a relative ``DATA_DIR`` against the repository, not the CWD."""
+        path = value.expanduser()
+        if not path.is_absolute():
+            path = _REPO_ROOT / path
+        return path.resolve()
+
+    @model_validator(mode="after")
+    def _validate_runtime_safety(self) -> Settings:
+        if self.is_production and self.debug:
+            raise ValueError(
+                "DEBUG must be false when ENVIRONMENT=production. Debug mode exposes "
+                "stack traces and interactive error details to clients."
+            )
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError(
+                f"CHUNK_OVERLAP ({self.chunk_overlap}) must be smaller than "
+                f"CHUNK_SIZE ({self.chunk_size})."
+            )
+        return self
 
     @field_validator("llm_provider", mode="before")
     @classmethod
@@ -208,9 +232,16 @@ class Settings(BaseSettings):
 
     @property
     def effective_embedding_base_url(self) -> str | None:
-        """Endpoint for embedding requests."""
+        """Endpoint for embedding requests.
+
+        ``EMBEDDING_BASE_URL`` is the explicit override. When it is unset the
+        chat endpoint is reused if provided, so one gateway setting configures
+        both clients; otherwise the provider default applies.
+        """
         if self.embedding_base_url:
             return self.embedding_base_url
+        if self.openai_base_url:
+            return self.openai_base_url
         if self.embedding_provider == "ollama":
             return OLLAMA_DEFAULT_BASE_URL
         return None

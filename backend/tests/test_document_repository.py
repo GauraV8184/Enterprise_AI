@@ -256,6 +256,43 @@ def test_fetch_with_an_unknown_document_id_returns_nothing(repository: DocumentR
     assert matrix.size == 0
 
 
+def test_ready_only_fetch_excludes_pending_documents(repository: DocumentRepository) -> None:
+    record = make_document(repository)
+    repository.add_chunks([make_chunk(document_id=record.id)])
+
+    all_chunks, _ = repository.fetch_chunks(owner_id=ALICE)
+    ready_chunks, _ = repository.fetch_chunks(owner_id=ALICE, ready_only=True)
+
+    assert len(all_chunks) == 1
+    assert ready_chunks == []
+
+    repository.update_status(
+        owner_id=ALICE, document_id=record.id, status=STATUS_READY, chunk_count=1
+    )
+    ready_chunks, _ = repository.fetch_chunks(owner_id=ALICE, ready_only=True)
+
+    assert len(ready_chunks) == 1
+
+
+def test_search_ignores_chunks_of_pending_documents(repository: DocumentRepository) -> None:
+    record = make_document(repository)
+    repository.add_chunks([make_chunk(document_id=record.id, embedding=[1.0, 0.0])])
+    query = np.array([1.0, 0.0], dtype=np.float32)
+
+    pending = repository.search_chunks(owner_id=ALICE, query_embedding=query, top_k=5)
+
+    assert pending.matches == []
+    assert pending.searched_chunks == 0
+
+    repository.update_status(
+        owner_id=ALICE, document_id=record.id, status=STATUS_READY, chunk_count=1
+    )
+    indexed = repository.search_chunks(owner_id=ALICE, query_embedding=query, top_k=5)
+
+    assert len(indexed.matches) == 1
+    assert indexed.searched_chunks == 1
+
+
 def test_counting_chunks(repository: DocumentRepository) -> None:
     record = make_document(repository)
     repository.add_chunks([make_chunk(document_id=record.id, index=index) for index in range(5)])

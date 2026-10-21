@@ -64,7 +64,6 @@ async def chat(
     answer = await generate_answer(
         model,
         history=[message.model_dump() for message in payload.messages],
-        system_prompt=payload.system_prompt,
         temperature=payload.temperature,
     )
 

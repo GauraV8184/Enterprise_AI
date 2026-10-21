@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -34,6 +36,48 @@ def test_cors_origins_accepts_json_array() -> None:
 def test_invalid_environment_is_rejected() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, environment="not-a-real-env")  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"chunk_size": 0},
+        {"chunk_size": 9000},
+        {"chunk_overlap": 1000, "chunk_size": 500},
+        {"retrieval_min_score": -2.0},
+        {"retrieval_min_score": 2.0},
+        {"retrieval_top_k": 0},
+        {"max_upload_mb": 0},
+        {"llm_timeout_seconds": 0},
+        {"storage_timeout_seconds": 0},
+    ],
+)
+def test_numeric_settings_are_bounded(overrides: dict) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
+def test_chunk_overlap_must_be_smaller_than_chunk_size() -> None:
+    with pytest.raises(ValidationError, match="CHUNK_OVERLAP"):
+        Settings(_env_file=None, chunk_size=500, chunk_overlap=500)  # type: ignore[call-arg]
+
+
+def test_relative_data_dir_is_anchored_to_the_repository_root() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    settings = Settings(_env_file=None, data_dir="relative-data")  # type: ignore[call-arg]
+
+    assert settings.data_dir == (repo_root / "relative-data").resolve()
+
+
+def test_production_refuses_debug_mode() -> None:
+    with pytest.raises(ValidationError, match="DEBUG must be false"):
+        Settings(_env_file=None, environment="production", debug=True)  # type: ignore[call-arg]
+
+
+def test_retrieval_floor_is_nonzero_by_default() -> None:
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.retrieval_min_score > 0.0
 
 
 def test_is_test_and_is_production_flags() -> None:

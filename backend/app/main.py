@@ -9,6 +9,7 @@ Run locally (from the ``backend`` directory):
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -31,6 +32,14 @@ from app.storage.local import LocalFileStore
 logger = get_logger(__name__)
 
 REQUEST_ID_HEADER = "X-Request-ID"
+_VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _request_id(request: Request) -> str:
+    supplied = request.headers.get(REQUEST_ID_HEADER)
+    if supplied and _VALID_REQUEST_ID.fullmatch(supplied):
+        return supplied
+    return uuid.uuid4().hex
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -171,11 +180,23 @@ def _register_request_context(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[[Request], Awaitable[object]]):
-        request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+        request_id = _request_id(request)
         token = request_id_ctx.set(request_id)
         started = time.perf_counter()
         try:
             response = await call_next(request)
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            response.headers[REQUEST_ID_HEADER] = request_id
+            logger.info(
+                "request_completed",
+                extra=safe_extra(
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=response.status_code,
+                    duration_ms=duration_ms,
+                ),
+            )
+            return response
         except Exception:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             logger.exception(
@@ -189,19 +210,6 @@ def _register_request_context(app: FastAPI) -> None:
             raise
         finally:
             request_id_ctx.reset(token)
-
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        logger.info(
-            "request_completed",
-            extra=safe_extra(
-                method=request.method,
-                path=request.url.path,
-                status_code=response.status_code,
-                duration_ms=duration_ms,
-            ),
-        )
-        return response
 
 
 app = create_app()
