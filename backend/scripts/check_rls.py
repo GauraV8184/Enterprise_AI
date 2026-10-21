@@ -181,6 +181,24 @@ class Client:
             headers={"apikey": self._anon, "Authorization": f"Bearer {token}"},
         )
 
+    def delete_object(self, path: str, token: str | None = None) -> httpx.Response:
+        """Delete with the service key: used only for cleanup.
+
+        Storage objects are not covered by ``on delete cascade`` from
+        ``auth.users``, so a user deletion leaves their files behind. Tests that
+        upload must remove the key explicitly.
+
+        No ``Content-Type`` here: Storage's gateway rejects a DELETE that declares
+        a JSON body and then sends none ("Body cannot be empty").
+        """
+        return self._http.delete(
+            self._url("storage", f"/object/documents/{path}"),
+            headers={
+                "apikey": self._anon,
+                "Authorization": f"Bearer {token or self._service}",
+            },
+        )
+
 
 # ---------------------------------------------------------------------------
 # Data helpers
@@ -244,6 +262,7 @@ def run(settings: Settings) -> int:
     client = Client(settings)
     suffix = uuid.uuid4().hex[:10]
     users: dict[str, str] = {}
+    object_path: str | None = None
     password = f"rls-check-{suffix}"
 
     try:
@@ -493,9 +512,20 @@ def run(settings: Settings) -> int:
         # -- cleanup ---------------------------------------------------------
         print("\n9) Cleanup")
         print("-" * 62)
+        if object_path:
+            # Storage objects do not cascade from auth.users, so the key has to
+            # be removed explicitly or it becomes an orphan in the bucket.
+            try:
+                removed = client.delete_object(object_path)
+                if removed.status_code < 400:
+                    print(f"  deleted storage object {object_path}")
+                else:
+                    print(f"  [warn] storage delete returned HTTP {removed.status_code}")
+            except Exception as exc:  # noqa: BLE001 - cleanup must not mask the result
+                print(f"  [warn] could not delete storage object: {exc!r}")
         for label, user_id in users.items():
             client.delete_user(user_id)
-            print(f"  deleted user {label} ({user_id[:8]}...) and everything it owned")
+            print(f"  deleted user {label} ({user_id[:8]}...) and its rows")
         client.close()
 
     return _finish(report)

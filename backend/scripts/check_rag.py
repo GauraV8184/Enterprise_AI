@@ -90,7 +90,7 @@ async def main() -> int:
                 embeddings=embeddings,
                 owner_id="check-rag",
                 document_id=record.id,
-                path=document_path,
+                data=document_path.read_bytes(),
                 filename="handbook.txt",
                 chunk_size=settings.chunk_size,
                 chunk_overlap=settings.chunk_overlap,

@@ -11,9 +11,10 @@ attack:
 3. **Size limit** - enforced by reading at most ``max_bytes + 1`` bytes, so a
    huge upload cannot exhaust memory before we notice.
 
-The original filename is **never** used to build a filesystem path. Storage uses
-a server-generated UUID plus the validated extension, which removes path
-traversal (``../../etc/passwd``) as a category rather than filtering for it.
+The filename is reduced to a single printable component and is then only the last
+segment of a storage key whose first two segments are server-generated ids. A
+client string therefore cannot choose where anything is written: path traversal
+is removed as a category rather than filtered for.
 """
 
 from __future__ import annotations
@@ -52,19 +53,33 @@ class FileType:
     label: str
     #: How the bytes are verified. ``zip`` means "must be a real Office archive".
     sniff: str
+    #: Server-chosen type sent to storage and recorded in the database. Never the
+    #: browser's ``Content-Type``: that header is attacker-controlled, and the
+    #: bucket's MIME allow-list would then be checking a claim rather than a fact.
+    mime_type: str
 
 
 #: Everything the parsers in ``app.rag.loaders`` can actually handle. Keeping
 #: this list next to the loader implementations is deliberate: an entry here
 #: without a matching parser would be a bug that uploads would hit at runtime.
 SUPPORTED_TYPES: dict[str, FileType] = {
-    ".pdf": FileType(".pdf", "PDF document", "pdf"),
-    ".docx": FileType(".docx", "Word document", "zip:word/document.xml"),
-    ".txt": FileType(".txt", "Plain text", "text"),
-    ".md": FileType(".md", "Markdown", "text"),
-    ".markdown": FileType(".markdown", "Markdown", "text"),
-    ".csv": FileType(".csv", "CSV spreadsheet", "text"),
-    ".xlsx": FileType(".xlsx", "Excel workbook", "zip:xl/workbook.xml"),
+    ".pdf": FileType(".pdf", "PDF document", "pdf", "application/pdf"),
+    ".docx": FileType(
+        ".docx",
+        "Word document",
+        "zip:word/document.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    ".txt": FileType(".txt", "Plain text", "text", "text/plain"),
+    ".md": FileType(".md", "Markdown", "text", "text/markdown"),
+    ".markdown": FileType(".markdown", "Markdown", "text", "text/markdown"),
+    ".csv": FileType(".csv", "CSV spreadsheet", "text", "text/csv"),
+    ".xlsx": FileType(
+        ".xlsx",
+        "Excel workbook",
+        "zip:xl/workbook.xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
 }
 
 MAX_EXTENSION_LENGTH = 12

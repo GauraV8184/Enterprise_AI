@@ -26,6 +26,7 @@ from app.database.repositories import DocumentRepository
 from app.llm.errors import LlmNotConfiguredError
 from app.llm.factory import build_chat_model, build_embeddings
 from app.security.supabase_auth import SupabaseTokenVerifier
+from app.storage.local import LocalFileStore
 
 logger = get_logger(__name__)
 
@@ -119,17 +120,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # The document store is created even without an LLM: listing and deleting
     # already-uploaded documents must keep working while a provider is down.
-    if settings.use_supabase_store:
+    if settings.use_supabase_store or settings.use_supabase_storage:
         # One pooled client shared by every request. The token is not held here -
-        # each request builds its own PostgrestClient around this pool.
+        # each request builds its own client around this pool.
         app.state.supabase_http = httpx.Client(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
+
+    if settings.use_supabase_store:
         app.state.repository = None
         logger.info("document_store_ready", extra=safe_extra(backend="supabase"))
     else:
         app.state.repository = DocumentRepository(settings.database_path)
+
+    if settings.use_supabase_storage:
+        app.state.file_store = None
+        logger.info(
+            "file_storage_ready",
+            extra=safe_extra(backend="supabase", bucket=settings.supabase_documents_bucket),
+        )
+    else:
+        app.state.file_store = LocalFileStore(settings.uploads_dir)
+        logger.info("file_storage_ready", extra=safe_extra(backend="local"))
 
     if settings.embeddings_configured:
         try:
@@ -160,6 +173,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.chat_model = None
     app.state.embeddings = None
     app.state.token_verifier = None
+    app.state.file_store = None
 
 
 def _register_request_context(app: FastAPI) -> None:

@@ -129,8 +129,9 @@ recommendation.
 ## 7. What is intentionally NOT here yet
 
 - No agents, tools, or LangGraph workflow — Phases 5–6.
-- Uploaded files still live on local disk. Metadata and vectors are already in
-  Postgres; moving the files into Supabase Storage is the remaining Phase 4 step.
+- No download endpoint for original files, and no signed URLs. Uploads and deletes
+  use Storage; reading an original back is only done internally for indexing.
+- No janitor for an object left behind if a delete fails after its rows are gone.
 - No OCR for scanned PDFs — they fail with a clear error instead.
 - No background worker; indexing runs inline in the request.
 - No rate limiting — Phase 7.
@@ -460,3 +461,125 @@ passed; only the live check failed. The wiring test now asserts the full URL.
 That is the general lesson: a mock proves the code does what you told it to. It
 does not prove the server agrees. `scripts/check_store.py` drives the real store
 with two signed-in users for exactly that reason.
+
+---
+
+## 15. Storage: bytes, keys and the second boundary (Phase 4)
+
+Row Level Security protected the rows. Nothing protected the files. An upload
+created a database row with an `owner_id`, then wrote the bytes to
+`data/uploads/<document_id>.pdf` - a path with no owner in it and no policy
+behind it. The only thing stopping one tenant reading another's PDF was that
+every code path remembered to check `owner_id` first.
+
+That is the same class of problem RLS was introduced to remove, one layer down.
+The fix is not "be careful"; it is to put the bytes somewhere that enforces the
+same rule.
+
+### One contract, two backends
+
+`app/storage/base.py` defines `DocumentFileStore` with three operations:
+`put`, `read`, `delete`. The interface is **byte-oriented**, deliberately. The
+Supabase backend has no filesystem path to hand out, and making it pretend to
+have one would turn the local backend into the only real implementation.
+
+- `LocalFileStore` writes under `data/uploads/` for SQLite development and the
+  offline test suite.
+- `SupabaseStorage` speaks the Storage REST API with a per-request client.
+
+The router depends on the protocol. It does not import either class.
+
+### The key is doing security work
+
+Objects are stored at:
+
+```
+<owner_id>/<document_id>/<filename>
+```
+
+The policies in `0002_storage_bucket.sql` compare the first segment to
+`auth.uid()`:
+
+```sql
+(storage.foldername(name))[1] = (select auth.uid())::text
+```
+
+There is no join back to `documents`, so the check cannot drift out of sync with
+the rows, and it is one string comparison. The owner segment is written by the
+server from the verified token; a client-supplied filename can only affect the
+last segment.
+
+The filename is then reduced to `[A-Za-z0-9._-]` by `storage_filename()`. That is
+not cosmetic: Supabase Storage rejects a key containing `#` with
+`400 Invalid key`. The database keeps the original display name, so
+`q3 report #1.txt` is still shown to the user while the key becomes
+`q3-report-1.txt`. The function is deterministic, which is what lets delete find
+the same object without storing a second column.
+
+### The caller's token, again
+
+`SupabaseStorage` is built per request with the caller's JWT as an immutable
+constructor argument. The reasoning is identical to `PostgrestClient`, and so is
+the failure it avoids: a shared client with a mutable `.auth(token)` lets
+concurrent requests act as each other.
+
+Using the service-role key here would have been simpler and would have made every
+policy in `0002` dead code. The bucket would still look private, but ownership
+would then rest entirely on this application's checks - exactly the single point
+of failure the move was meant to remove.
+
+### Read back before indexing
+
+After `put`, the upload path calls `read` and indexes *those* bytes rather than
+the request buffer it still holds. It costs one download (bounded by the 25 MB
+upload limit), and buys two things:
+
+1. The write is proven to have landed before any vectors are created.
+2. The caller's **select** policy is exercised on every upload. A correct insert
+   policy with a broken select policy would otherwise stay invisible until a
+   later download.
+
+It is also exactly what a background indexer will have to do, so moving ingestion
+off the request thread later does not change the storage code.
+
+### Failure semantics
+
+If the object cannot be written, the document row is already there. It is marked
+`failed` with the storage error and returned with its id, so it is visible and
+deletable instead of sitting at `pending` forever. A failure to record that status
+is logged, not allowed to mask the original error.
+
+Deletion goes the other way: rows and vectors first, then the object. If the
+object delete fails, the request still succeeds - the searchable data is gone,
+which is what the caller asked for - and the key is deterministic, so an orphan
+can be found and removed later. The reverse order would leave a listed document
+whose original had already vanished.
+
+### Four things only the live checks found
+
+**`#` is not a legal key character.** The first version percent-encoded the key
+correctly and the server still answered `400 Invalid key`, because it decoded the
+path and then validated the raw character. Sanitising the filename fixed it.
+
+**Storage reports policy violations as `400`, not `403`.** A foreign insert comes
+back as `new row violates row-level security policy`; a foreign delete as
+`Access denied`. Both were initially mapped to a generic 500, which would have
+turned a correct refusal into an apparent outage. They now map to
+`AccessDeniedError`.
+
+**A DELETE must not declare a JSON body.** Cleanup in `check_rls.py` reused a
+header builder that always set `Content-Type: application/json`; Fastify rejected
+the bodyless request with `Body cannot be empty when content-type is set to
+'application/json'`. The application's client never set that header, which is why
+only the test harness failed.
+
+**Deleting a user does not delete their objects.** `storage.objects` has no
+foreign key to `auth.users`, so `on delete cascade` does not reach the bucket.
+The live checks now delete each key explicitly and then list the owner's prefix to
+prove the bucket is empty.
+
+### What is not here yet
+
+There is no download endpoint, so no signed URLs either; the API still never
+serves the original file. There is no janitor for orphaned objects. Indexing is
+still synchronous, now with one extra network round trip.

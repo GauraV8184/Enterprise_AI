@@ -1,4 +1,10 @@
-"""The ingest pipeline: file on disk -> parsed text -> chunks -> stored vectors.
+"""The ingest pipeline: stored bytes -> parsed text -> chunks -> stored vectors.
+
+The pipeline no longer knows where the bytes live. It receives them from the
+caller, which either read them from the local filesystem or fetched them from
+Supabase Storage with the caller's own token. That is what makes the same code
+path work in both deployments, and it is also the shape a background indexing
+worker needs.
 
 Ordering is deliberate. The document is marked ``processing`` before any work
 starts, so a crash mid-ingest leaves a visible "processing" record rather than a
@@ -31,7 +37,7 @@ from app.database.repositories import (
     new_id,
 )
 from app.rag.chunking import chunk_blocks
-from app.rag.loaders import NoExtractableTextError, load_document
+from app.rag.loaders import NoExtractableTextError, load_document_from_bytes
 
 
 class DocumentProcessingError(AppError):
@@ -73,12 +79,16 @@ def ingest_document(
     embeddings: Embeddings,
     owner_id: str,
     document_id: str,
-    path: Path,
+    data: bytes,
     filename: str,
     chunk_size: int,
     chunk_overlap: int,
 ) -> IngestResult:
     """Parse, chunk, embed and store one document.
+
+    ``data`` is the stored original, read back by the caller. It is not the raw
+    upload buffer on purpose: reading it back proves the object really exists and
+    that the caller's storage policy admits it before any vectors are created.
 
     Returns the final record. On failure the record is marked ``failed`` and the
     original exception propagates so the caller can decide the HTTP status - the
@@ -93,7 +103,11 @@ def ingest_document(
         raise DocumentProcessingError("The document no longer exists.")
 
     try:
-        loaded = load_document(path, filename=filename)
+        loaded = load_document_from_bytes(
+            data,
+            filename=filename,
+            extension=Path(filename).suffix.lower(),
+        )
         chunks = chunk_blocks(
             loaded.blocks,
             chunk_size=chunk_size,

@@ -28,6 +28,8 @@ from app.security.identity import (
     CurrentUserDep,
     extract_bearer_token,
 )
+from app.storage.base import DocumentFileStore
+from app.storage.supabase import SupabaseStorage
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -85,6 +87,46 @@ def get_repository(request: Request, user: CurrentUserDep) -> DocumentStore:
     return repository
 
 
+def get_file_store(request: Request, user: CurrentUserDep) -> DocumentFileStore:
+    """Return the file store for this request.
+
+    The SQLite development path uses one process-wide local store: it has no
+    identity of its own and every call is scoped by the owner id passed in. The
+    Supabase store carries the caller's access token, so - exactly like
+    :func:`get_repository` - it is rebuilt per request rather than shared.
+
+    ``user`` is a dependency rather than an argument: identity must be resolved
+    before a token can be forwarded, and a missing token must fail as 401 rather
+    than as a confusing storage 403.
+    """
+    settings: Settings = request.app.state.settings
+
+    if settings.use_supabase_storage:
+        http_client = getattr(request.app.state, "supabase_http", None)
+        if http_client is None:
+            raise RuntimeError("The Supabase HTTP client was not initialised at startup.")
+        if settings.supabase_anon_key is None:
+            raise RuntimeError("SUPABASE_ANON_KEY is missing; refusing to use storage without it.")
+
+        token = extract_bearer_token(request.headers.get(AUTHORIZATION_HEADER))
+        if token is None:
+            raise NotAuthenticatedError()
+
+        return SupabaseStorage(
+            base_url=settings.supabase_service_url("storage"),
+            api_key=settings.supabase_anon_key.get_secret_value(),
+            access_token=token,
+            client=http_client,
+            bucket=settings.supabase_documents_bucket,
+            timeout=settings.storage_timeout_seconds,
+        )
+
+    store = getattr(request.app.state, "file_store", None)
+    if store is None:
+        raise RuntimeError("The local file store was not initialised at startup.")
+    return store
+
+
 def get_embeddings(request: Request) -> Embeddings:
     """Return the app's embedding model, or fail clearly if none is configured."""
     embeddings = getattr(request.app.state, "embeddings", None)
@@ -101,4 +143,5 @@ def get_embeddings(request: Request) -> Embeddings:
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 ChatModelDep = Annotated[BaseChatModel, Depends(get_chat_model)]
 RepositoryDep = Annotated[DocumentStore, Depends(get_repository)]
+FileStoreDep = Annotated[DocumentFileStore, Depends(get_file_store)]
 EmbeddingsDep = Annotated[Embeddings, Depends(get_embeddings)]

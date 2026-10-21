@@ -12,15 +12,14 @@ returns 404 rather than 403 - a 403 would confirm that the id exists.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Response, UploadFile, status
 
-from app.api.deps import ChatModelDep, EmbeddingsDep, RepositoryDep, SettingsDep
+from app.api.deps import ChatModelDep, EmbeddingsDep, FileStoreDep, RepositoryDep, SettingsDep
 from app.core.errors import AppError
 from app.core.logging import get_logger, request_id_ctx, safe_extra
-from app.database.repositories import STATUS_FAILED, DocumentRecord
+from app.database.repositories import STATUS_FAILED, DocumentRecord, DocumentStore
 from app.rag.ingest import ingest_document
 from app.rag.retriever import answer_question, search
 from app.schemas.chat import TokenUsage
@@ -33,7 +32,7 @@ from app.schemas.documents import (
     SearchResponse,
     SourceCitation,
 )
-from app.security.file_validation import validate_upload
+from app.security.file_validation import normalize_filename, validate_upload
 from app.security.identity import CurrentUserDep
 
 logger = get_logger(__name__)
@@ -47,13 +46,36 @@ class DocumentNotFoundError(AppError):
     public_message = "No such document."
 
 
-def _storage_path(uploads_dir: Path, document_id: str, extension: str) -> Path:
-    """Where an uploaded original lives.
+def _mark_failed(
+    repository: DocumentStore,
+    *,
+    owner_id: str,
+    document_id: str,
+    error: AppError,
+) -> None:
+    """Record a storage failure against the document, best effort.
 
-    The name is server-generated, so a client-supplied filename can never
-    influence the path. See ``app/security/file_validation.py``.
+    The document row is created before the bytes are stored, so a storage outage
+    would otherwise leave it ``pending`` forever with no explanation. Marking it
+    ``failed`` makes it visible and deletable.
+
+    A failure to write the status must not replace the original error: the caller
+    is about to receive the storage error, and a second one would only obscure it.
     """
-    return uploads_dir / f"{document_id}{extension}"
+    try:
+        repository.update_status(
+            owner_id=owner_id,
+            document_id=document_id,
+            status=STATUS_FAILED,
+            error=error.message,
+            chunk_count=0,
+        )
+    except AppError:
+        logger.warning(
+            "document_failure_status_not_recorded",
+            extra=safe_extra(document_id=document_id, error=error.code),
+        )
+    error.details = {**error.details, "document_id": document_id, "status": STATUS_FAILED}
 
 
 def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
@@ -86,36 +108,54 @@ def upload_document(
     *,
     settings: SettingsDep,
     repository: RepositoryDep,
+    file_store: FileStoreDep,
     embeddings: EmbeddingsDep,
     user: CurrentUserDep,
 ) -> DocumentResponse:
     """Validate, store and index an uploaded file.
 
-    Indexing runs inline, so a successful response means the document is already
-    searchable. A document that fails to index is still recorded with
-    ``status="failed"`` and the reason, and the error response carries its id so it
-    can be inspected or removed.
+    The original goes to the file store; the searchable text and vectors go to the
+    document store. Indexing runs inline, so a successful response means the
+    document is already searchable. A document that fails either step is still
+    recorded with ``status="failed"`` and the reason, and the error response
+    carries its id so it can be inspected or removed.
 
     Repository note: processing a large file inline means a slow request. Moving
     this to a background worker is the natural next step and needs no API change,
     because ``status`` already models the transition.
     """
     data = _read_capped(file, settings.max_upload_bytes)
-    file_type = validate_upload(
-        filename=file.filename, data=data, max_bytes=settings.max_upload_bytes
-    )
+    safe_name = normalize_filename(file.filename)
+    file_type = validate_upload(filename=safe_name, data=data, max_bytes=settings.max_upload_bytes)
 
     record = repository.create_document(
         owner_id=user.user_id,
-        filename=(file.filename or "upload").replace("\\", "/").rsplit("/", 1)[-1],
-        content_type=file.content_type or "application/octet-stream",
+        filename=safe_name,
+        content_type=file_type.mime_type,
         extension=file_type.extension,
         size_bytes=len(data),
     )
 
-    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
-    path = _storage_path(settings.uploads_dir, record.id, file_type.extension)
-    path.write_bytes(data)
+    try:
+        file_store.put(
+            owner_id=user.user_id,
+            document_id=record.id,
+            filename=safe_name,
+            data=data,
+            content_type=file_type.mime_type,
+        )
+        # Read the object back rather than indexing the buffer we still hold. It
+        # costs one download, but it proves the write succeeded and that the
+        # caller's read policy admits the object - before any vectors exist. It
+        # is also exactly what a background indexer will have to do.
+        stored = file_store.read(
+            owner_id=user.user_id,
+            document_id=record.id,
+            filename=safe_name,
+        )
+    except AppError as exc:
+        _mark_failed(repository, owner_id=user.user_id, document_id=record.id, error=exc)
+        raise
 
     logger.info(
         "document_uploaded",
@@ -132,7 +172,7 @@ def upload_document(
             embeddings=embeddings,
             owner_id=user.user_id,
             document_id=record.id,
-            path=path,
+            data=stored,
             filename=record.filename,
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -175,7 +215,7 @@ def get_document(
 def delete_document(
     document_id: str,
     repository: RepositoryDep,
-    settings: SettingsDep,
+    file_store: FileStoreDep,
     user: CurrentUserDep,
 ) -> Response:
     """Delete a document, every vector derived from it, and the stored original.
@@ -187,15 +227,19 @@ def delete_document(
 
     repository.delete_document(owner_id=user.user_id, document_id=document_id)
 
-    path = _storage_path(settings.uploads_dir, record.id, record.extension)
     try:
-        path.unlink(missing_ok=True)
-    except OSError:
+        file_store.delete(
+            owner_id=user.user_id,
+            document_id=record.id,
+            filename=record.filename,
+        )
+    except AppError as exc:
         # Losing the original is not a reason to fail the delete: the searchable
-        # data is already gone, which is what the user asked for.
+        # data is already gone, which is what the user asked for. The key is
+        # deterministic, so an orphan can be found and removed later.
         logger.warning(
-            "document_file_unlink_failed",
-            extra=safe_extra(document_id=document_id, path=str(path)),
+            "document_file_delete_failed",
+            extra=safe_extra(document_id=document_id, error=exc.code),
         )
 
     logger.info("document_deleted", extra=safe_extra(document_id=document_id))

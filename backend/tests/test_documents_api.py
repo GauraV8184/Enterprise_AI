@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
+from app.storage.errors import FileStoreUnavailableError
 from tests.conftest import upload
 from tests.fakes import FakeChatModel
 from tests.sample_files import (
@@ -453,3 +454,57 @@ def test_empty_user_header_is_rejected(rag_client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "not_authenticated"
+
+
+# --------------------------------------------------------------------------
+# Original file storage
+# --------------------------------------------------------------------------
+
+
+def test_the_original_is_stored_under_the_owner_and_document(
+    rag_client: TestClient, documents_dir: Path
+) -> None:
+    """The key layout is not cosmetic: the Supabase policies check its first segment."""
+    source = write_text_file(documents_dir)
+    body = upload(rag_client, source).json()
+    settings: Settings = rag_client.app.state.settings
+
+    stored = settings.uploads_dir / settings.dev_user_id / body["id"] / body["filename"]
+
+    assert stored.read_bytes() == source.read_bytes()
+
+    assert rag_client.delete(f"/api/documents/{body['id']}").status_code == 204
+    assert not stored.exists()
+
+
+class _UnavailableFileStore:
+    """Every operation fails the way a storage outage would."""
+
+    def put(self, **_kwargs: object) -> str:
+        raise FileStoreUnavailableError()
+
+    def read(self, **_kwargs: object) -> bytes:
+        raise FileStoreUnavailableError()
+
+    def delete(self, **_kwargs: object) -> None:
+        raise FileStoreUnavailableError()
+
+
+def test_a_storage_failure_leaves_a_visible_failed_document(
+    rag_client: TestClient, documents_dir: Path
+) -> None:
+    """A row created before an outage must not sit at ``pending`` forever."""
+    rag_client.app.state.file_store = _UnavailableFileStore()
+
+    response = upload(rag_client, write_text_file(documents_dir))
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "file_store_unavailable"
+
+    document_id = response.json()["details"]["document_id"]
+    listing = rag_client.get("/api/documents").json()["documents"]
+    record = next(item for item in listing if item["id"] == document_id)
+
+    assert record["status"] == "failed"
+    assert record["chunk_count"] == 0
+    assert record["error"]

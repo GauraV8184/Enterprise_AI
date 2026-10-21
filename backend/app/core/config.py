@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None
     supabase_documents_bucket: str = "documents"
+    # Uploads can be slower than a query: the whole file crosses the network
+    # twice (stored, then read back for indexing), so this is deliberately more
+    # generous than the PostgREST timeout.
+    storage_timeout_seconds: float = 120.0
 
     # Full Postgres connection string, used ONLY by scripts/apply_migrations.py.
     # The application never opens a direct connection: it goes through PostgREST
@@ -146,6 +150,12 @@ class Settings(BaseSettings):
     #   sqlite   - always the local development store
     #   supabase - always Supabase; fail at startup if it is not configured
     document_store: Literal["auto", "sqlite", "supabase"] = "auto"
+
+    # Where the original uploaded bytes live.
+    #   auto     - Supabase Storage when the document store uses Supabase
+    #   local    - the local filesystem (development and the offline test suite)
+    #   supabase - always Supabase Storage; fail at startup if it is not configured
+    file_storage: Literal["auto", "local", "supabase"] = "auto"
 
     # Identity source for document endpoints.
     #   auto     - Supabase Auth when configured, otherwise the dev header stub
@@ -337,6 +347,19 @@ class Settings(BaseSettings):
             return False
         return self.supabase_configured
 
+    @property
+    def use_supabase_storage(self) -> bool:
+        """Whether original uploads live in Supabase Storage.
+
+        ``auto`` follows the document store: keeping rows in Postgres and bytes
+        on one machine's disk is the inconsistency this backend exists to remove.
+        """
+        if self.file_storage == "supabase":
+            return True
+        if self.file_storage == "local":
+            return False
+        return self.use_supabase_store
+
     def validate_supabase_expectations(self) -> None:
         """Fail fast on combinations that cannot work.
 
@@ -347,6 +370,8 @@ class Settings(BaseSettings):
             raise ValueError("DOCUMENT_STORE=supabase requires SUPABASE_URL and SUPABASE_ANON_KEY.")
         if self.auth_backend == "supabase" and not self.supabase_configured:
             raise ValueError("AUTH_BACKEND=supabase requires SUPABASE_URL and SUPABASE_ANON_KEY.")
+        if self.file_storage == "supabase" and not self.supabase_configured:
+            raise ValueError("FILE_STORAGE=supabase requires SUPABASE_URL and SUPABASE_ANON_KEY.")
         if self.is_production and not self.supabase_configured:
             raise ValueError(
                 "ENVIRONMENT=production requires Supabase: without it there is no way to "
@@ -363,6 +388,23 @@ class Settings(BaseSettings):
                 "with the caller's own access token so that Row Level Security decides what it "
                 "can see, and the development header stub supplies no token. Set "
                 "DOCUMENT_STORE=sqlite as well if you want to use the stub."
+            )
+        if self.use_supabase_storage and not self.use_supabase_auth:
+            # Same argument as above, one layer down: the bucket is private and
+            # its policies key off auth.uid(), so there is no identity to enforce
+            # without a real token.
+            raise ValueError(
+                "FILE_STORAGE=supabase requires AUTH_BACKEND=supabase. Storage policies compare "
+                "the object key to the caller's user id, which means a verified token must be "
+                "forwarded. Set FILE_STORAGE=local for the development stub."
+            )
+        if self.is_production and not self.use_supabase_storage:
+            # A container filesystem is replaced on every deploy and is not shared
+            # between instances. Rows would survive and the originals would not.
+            raise ValueError(
+                "ENVIRONMENT=production requires Supabase Storage. Uploads written to the local "
+                "filesystem are lost on redeploy and are invisible to other instances. Remove "
+                "FILE_STORAGE=local."
             )
 
 

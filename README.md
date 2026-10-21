@@ -66,6 +66,10 @@ Enterprize_AI/
 │   │   │   ├── repositories.py        # store contract + SQLite implementation
 │   │   │   ├── supabase_repository.py # PostgREST store; search via pgvector
 │   │   │   └── postgrest.py           # per-caller transport + error mapping
+│   │   ├── storage/
+│   │   │   ├── base.py                # file-store contract + key layout
+│   │   │   ├── local.py               # filesystem backend (dev + tests)
+│   │   │   └── supabase.py            # Storage REST client, per caller
 │   │   ├── security/
 │   │   │   ├── file_validation.py  # extension, size and magic-byte checks
 │   │   │   ├── identity.py         # who is asking (Supabase JWT or dev stub)
@@ -84,8 +88,13 @@ Enterprize_AI/
 │   │       └── documents.py
 │   ├── scripts/
 │   │   ├── check_llm.py            # live diagnostic for the LLM setup
-│   │   └── check_rag.py            # live diagnostic for the document pipeline
-│   ├── tests/                      # 226 offline tests + 5 opt-in live tests
+│   │   ├── check_rag.py            # live diagnostic for the document pipeline
+│   │   ├── check_supabase.py       # credentials, schema and catalog audit
+│   │   ├── check_rls.py            # tenant isolation through the REST API
+│   │   ├── check_store.py          # the application's store, live
+│   │   ├── check_storage.py        # bucket policies, live
+│   │   └── apply_migrations.py     # apply supabase/migrations over psycopg
+│   ├── tests/                      # 329 offline tests + 5 opt-in live tests
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   └── pyproject.toml
@@ -382,11 +391,19 @@ so the rest of the application does not know which is running:
 
 - **Supabase** — `documents` and `chunks` in Postgres with a `vector(768)` column
   and an HNSW index. Similarity search is one SQL function call, so the vectors
-  never leave the database. Uploaded files still go to `data/uploads/`; moving
-  them into Supabase Storage is the remaining Phase 4 step.
+  never leave the database.
 - **SQLite** — `data/app.db` with vectors as raw float32 and a NumPy cosine scan.
   Correct, fast enough for thousands of chunks, and it needs no account, which is
   why the offline test suite and the SQLite path still use it.
+
+Original files follow `FILE_STORAGE` (default `auto`, which follows the document
+store). In production they go to the private `documents` bucket, keyed
+`<owner_id>/<document_id>/<sanitised filename>` and written with the **caller's**
+access token, so the bucket's RLS policies - not application code - decide who
+can read them. The SQLite path keeps the same key layout under `data/uploads/`,
+so the offline suite exercises the same code. `ENVIRONMENT=production` refuses to
+start with local file storage: a container filesystem is replaced on every deploy
+and is not shared between instances.
 
 ---
 
@@ -394,7 +411,7 @@ so the rest of the application does not know which is running:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 294 passed, 5 skipped
+.\.venv\Scripts\python.exe -m pytest          # 329 passed, 5 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
@@ -405,7 +422,7 @@ The 5 skipped tests are **live** tests that need a running provider. They are op
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
 
-With a provider running the whole suite is green: **294 passed**, including real
+With a provider running the whole suite is green: **334 passed**, including real
 chat calls, real embeddings, and a full upload → retrieve → cite cycle.
 
 The Supabase side has its own live checks. Each creates throwaway users with the
@@ -415,6 +432,7 @@ admin key, runs real requests, and deletes what it created:
 .\.venv\Scripts\python.exe scripts\check_supabase.py   # credentials, schema, catalog audit
 .\.venv\Scripts\python.exe scripts\check_rls.py        # tenant isolation via the REST API
 .\.venv\Scripts\python.exe scripts\check_store.py      # the application's store, end to end
+.\.venv\Scripts\python.exe scripts\check_storage.py    # bucket policies with two real users
 ```
 
 The service-role key is used by those scripts only. The application never reads
@@ -510,7 +528,7 @@ Responses include `request_id`, which also appears in the logs and in the
 | 1 | Foundation: FastAPI, config, logging, tests, docs | ✅ done |
 | 2 | LLM integration: chat, structured output, error handling | ✅ done |
 | 3 | RAG: upload, parse, chunk, embed, retrieve | ✅ done |
-| 4 | Supabase: schema, Auth, Storage, RLS, persistence | 🚧 schema, Auth, RLS and persistence done; Storage pending |
+| 4 | Supabase: schema, Auth, Storage, RLS, persistence | ✅ done |
 | 5 | LangGraph workflow + state | ⬜ |
 | 6 | Tools & specialist agents + report generation | ⬜ |
 | 7 | Security, audit logging, rate limits, SQL safety | ⬜ |

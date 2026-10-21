@@ -130,8 +130,10 @@ tables, so it is refused rather than merely shown an empty list.
 to `auth.uid()`. That is why the key layout is fixed as
 `<owner_id>/<document_id>/<filename>` and why the owner segment is written by the
 server from the verified token — a filename supplied by the client can only ever
-affect the last segment, and `file_validation.normalize_filename` reduces it to a
-bare basename before it is used.
+affect the last segment. It is reduced to a bare basename by
+`file_validation.normalize_filename`, then to `[A-Za-z0-9._-]` by
+`storage_filename`, because Storage rejects characters such as `#` outright. The
+display name in `documents.filename` is not changed.
 
 ---
 
@@ -156,10 +158,13 @@ downloads embeddings to compare them.
 | `python scripts/check_supabase.py` | credentials work, the schema and policies exist, and the catalog does not over-grant privileges |
 | `python scripts/check_rls.py` | two real users cannot reach each other's rows through the REST API directly |
 | `python scripts/check_store.py` | the application's own store works end to end and stays tenant-scoped |
+| `python scripts/check_storage.py` | the bucket accepts the caller's own token and refuses a second user's read, write and delete |
 
-The first two create users through the admin API; the third drives the repository
-exactly as a request would, with real access tokens. All three delete what they
-create.
+All four create throwaway users through the admin API. They delete the users, the
+rows cascade, and the storage objects are removed explicitly: `storage.objects`
+has no foreign key to `auth.users`, so deleting a user does **not** delete their
+files. `check_rls.py` and `check_storage.py` list the owner's prefix afterwards
+to prove the bucket is empty.
 
 ---
 
