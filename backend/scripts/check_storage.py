@@ -44,8 +44,6 @@ from app.storage.supabase import SupabaseStorage  # noqa: E402
 
 TIMEOUT = 30.0
 PASSWORD = "throwaway-password-not-used-elsewhere"
-# A space and a "#" on purpose: both must survive the URL, and "#" truncates a
-# path into a fragment if the client forgets to encode it.
 FILENAME = "q3 report #1.txt"
 PAYLOAD = b"the vault code is seven-two-one"
 
@@ -154,8 +152,6 @@ def main() -> int:
             bob_store.read(owner_id=alice_id, document_id=document_id, filename=FILENAME)
             report.fail("B read A's object")
         except FileStoreObjectMissingError:
-            # RLS makes the row invisible, so it is indistinguishable from
-            # absence. That is the intended answer, not a leakage of existence.
             report.ok("B cannot read A's object (RLS hides it: not found)")
         except AccessDeniedError:
             report.ok("B cannot read A's object (403 from the policy)")
@@ -176,9 +172,6 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             report.fail("B's write failed in an unexpected way", repr(exc))
 
-        # Supabase may answer a foreign DELETE with 200 (zero rows removed) or
-        # with a refusal. Either is safe only if the object is still there; the
-        # read below is the assertion that matters.
         try:
             bob_store.delete(owner_id=alice_id, document_id=document_id, filename=FILENAME)
         except (AccessDeniedError, FileStoreObjectMissingError):
@@ -196,8 +189,6 @@ def main() -> int:
 
         print("\n4) The public anon key reaches nothing")
         print("-" * 70)
-        # This must run while the object still exists: checking after A deletes it
-        # would report "denied" for a 404 that only means "gone".
         anon_store = store_for(
             settings,
             settings.supabase_anon_key.get_secret_value(),
@@ -238,7 +229,6 @@ def main() -> int:
         print("\n6) Cleanup")
         print("-" * 70)
         if object_key:
-            # Explicit, because deleting the user does not touch storage.
             http.delete(
                 f"{settings.supabase_service_url('storage')}/object/"
                 f"{quote(settings.supabase_documents_bucket, safe='')}/"

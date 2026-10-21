@@ -144,8 +144,6 @@ class SupabaseDocumentRepository:
     def __init__(self, client: PostgrestClient) -> None:
         self._client = client
 
-    # -- documents ---------------------------------------------------------
-
     def create_document(
         self,
         *,
@@ -255,8 +253,6 @@ class SupabaseDocumentRepository:
         ).json()
         return bool(rows)
 
-    # -- chunks ------------------------------------------------------------
-
     def add_chunks(self, chunks: Sequence[ChunkRecord]) -> int:
         """Insert chunks in one request, which PostgREST runs as one transaction.
 
@@ -305,8 +301,6 @@ class SupabaseDocumentRepository:
             return self._count_in_scope(owner_id=owner_id, scope=[document_uuid])
         return self._count_in_scope(owner_id=owner_id, scope=None)
 
-    # -- search ------------------------------------------------------------
-
     def search_chunks(
         self,
         *,
@@ -324,8 +318,6 @@ class SupabaseDocumentRepository:
         """
         vector = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
 
-        # An empty list means "no filter", matching the SQLite store. Filtering to
-        # nothing would differ between backends, which is worse than either choice.
         scope: list[str] | None = None
         if document_ids:
             scope = [
@@ -361,8 +353,6 @@ class SupabaseDocumentRepository:
             searched_chunks=self._count_in_scope(owner_id=owner_id, scope=scope),
         )
 
-    # -- helpers -----------------------------------------------------------
-
     def _count_in_scope(self, *, owner_id: str, scope: list[str] | None) -> int:
         params = {"select": "id", "owner_id": f"eq.{owner_id}", "limit": "1"}
         if scope:
@@ -383,8 +373,6 @@ class SupabaseDocumentRepository:
 
         stored = self._embedding_dimensions()
         if stored is None:
-            # The error was about dimensions but the message could not be parsed
-            # and the helper did not answer. Nothing useful to tell the caller.
             raise DocumentStoreError() from exc
         return EmbeddingDimensionMismatchError(
             stored_dimensions=stored, query_dimensions=query_dimensions

@@ -9,10 +9,6 @@ from app.llm.schemas import TaskIntent
 from app.main import create_app
 from tests.fakes import FakeChatModel, make_rate_limit_error
 
-# --------------------------------------------------------------------------
-# GET /api/chat/status
-# --------------------------------------------------------------------------
-
 
 def test_status_reports_not_configured(client: TestClient) -> None:
     body = client.get("/api/chat/status").json()
@@ -63,11 +59,6 @@ def test_llm_endpoints_require_authentication_when_supabase_auth_is_enabled() ->
         assert malformed.json()["code"] == "invalid_token"
 
 
-# --------------------------------------------------------------------------
-# POST /api/chat
-# --------------------------------------------------------------------------
-
-
 def test_chat_returns_answer(llm_client: TestClient) -> None:
     response = llm_client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]})
     assert response.status_code == 200
@@ -75,7 +66,7 @@ def test_chat_returns_answer(llm_client: TestClient) -> None:
     body = response.json()
     assert body["answer"] == "Hello from the fake model."
     assert body["provider"] == "openai"
-    assert body["model"] == "fake-model"  # taken from provider metadata
+    assert body["model"] == "fake-model"
     assert body["request_id"]
     assert body["request_id"] == response.headers["X-Request-ID"]
 
@@ -171,13 +162,7 @@ def test_provider_auth_error_is_reported_clearly(llm_client: TestClient, fake_mo
     body = response.json()
     assert body["code"] == "llm_authentication_failed"
     assert "OPENAI_API_KEY" in body["detail"]
-    # The provider's raw body must never be echoed to the client.
     assert "provider error" not in response.text
-
-
-# --------------------------------------------------------------------------
-# Request validation
-# --------------------------------------------------------------------------
 
 
 def test_empty_messages_are_rejected(llm_client: TestClient) -> None:
@@ -216,11 +201,6 @@ def test_overlong_message_is_rejected(llm_client: TestClient) -> None:
     assert response.status_code == 422
 
 
-# --------------------------------------------------------------------------
-# POST /api/chat/intent  (structured output)
-# --------------------------------------------------------------------------
-
-
 def _sample_intent() -> TaskIntent:
     return TaskIntent(
         intent="report",
@@ -253,11 +233,6 @@ def test_intent_endpoint_without_configuration_returns_503(client: TestClient) -
     response = client.post("/api/chat/intent", json={"text": "Analyze our Q3 sales"})
     assert response.status_code == 503
     assert response.json()["code"] == "llm_not_configured"
-
-
-# --------------------------------------------------------------------------
-# Startup wiring
-# --------------------------------------------------------------------------
 
 
 def test_lifespan_builds_a_model_when_configured() -> None:

@@ -43,8 +43,6 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
     if settings.llm_provider == "ollama":
         return _build_ollama(settings)
 
-    # Defensive: ``llm_provider`` is validated at startup, so this is unreachable
-    # unless a new provider value is added without a corresponding branch.
     raise LlmNotConfiguredError(f"Unsupported LLM provider: {settings.llm_provider!r}")
 
 
@@ -82,8 +80,6 @@ def _build_openai_compatible(
 
     kwargs: dict[str, Any] = {
         "model_name": settings.openai_model,
-        # Passing a plain string is fine; pydantic coerces it to SecretStr, which
-        # keeps the value out of repr() and tracebacks.
         "openai_api_key": api_key,
         "temperature": settings.llm_temperature,
         "request_timeout": settings.llm_timeout_seconds,
@@ -156,8 +152,6 @@ def _build_openai_compatible_embeddings(
         "openai_api_key": api_key,
         "request_timeout": settings.embedding_timeout_seconds,
         "chunk_size": settings.embedding_batch_size,
-        # Local servers do not implement the tokeniser-based length check, and
-        # it would reject non-OpenAI models.
         "check_embedding_ctx_length": False,
     }
     if base_url:

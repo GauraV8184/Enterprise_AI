@@ -95,7 +95,7 @@ async def main() -> int:
                 chunk_size=settings.chunk_size,
                 chunk_overlap=settings.chunk_overlap,
             )
-        except Exception as exc:  # surface the real reason rather than a traceback
+        except Exception as exc:
             print(f"  FAILED: {type(exc).__name__}: {exc}")
             print("\nRESULT: FAILED - the document could not be indexed.")
             print("  Is the embedding model pulled?  ollama pull nomic-embed-text")

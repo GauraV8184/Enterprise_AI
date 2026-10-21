@@ -45,11 +45,6 @@ AUDR = "authenticated"
 SUBJECT = "8f14e45f-ceea-467a-9b2b-1c0f9a4d2e77"
 
 
-# ---------------------------------------------------------------------------
-# Building tokens
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class SigningKeyPair:
     """A private key plus the public JWK a Supabase project would publish."""
@@ -143,11 +138,6 @@ def make_settings(**overrides: Any) -> Settings:
     )
 
 
-# ---------------------------------------------------------------------------
-# The happy path
-# ---------------------------------------------------------------------------
-
-
 def test_valid_token_produces_a_verified_identity() -> None:
     keypair = make_keypair()
     verifier, _ = make_verifier(keypair)
@@ -182,11 +172,6 @@ def test_tokens_without_email_still_verify() -> None:
     assert identity.email is None
 
 
-# ---------------------------------------------------------------------------
-# Rejections
-# ---------------------------------------------------------------------------
-
-
 def test_expired_token_reports_expiry_specifically() -> None:
     """A client needs to tell "refresh and retry" from "something is wrong"."""
     keypair = make_keypair()
@@ -216,7 +201,7 @@ def test_small_clock_skew_is_tolerated() -> None:
 
 def test_token_signed_by_a_different_key_is_rejected() -> None:
     published = make_keypair(kid="published")
-    attacker = make_keypair(kid="published")  # same kid, different private key
+    attacker = make_keypair(kid="published")
     verifier, _ = make_verifier(published)
 
     with pytest.raises(InvalidTokenError):
@@ -278,7 +263,6 @@ def test_hs256_token_is_rejected_even_when_signed_with_the_public_key() -> None:
     """
     keypair = make_keypair()
     verifier, fake = make_verifier(keypair)
-    # The attacker's "secret" is the project's published public key material.
     public_pem = keypair.jwk["x"] + keypair.jwk["y"]
     forged = jwt.encode(make_claims(), public_pem, algorithm="HS256", headers={"kid": keypair.kid})
 
@@ -357,14 +341,8 @@ def test_token_without_subject_is_rejected() -> None:
     claims = make_claims()
     del claims["sub"]
 
-    # `sub` is in the required-claims list, so decode itself refuses this.
     with pytest.raises(InvalidTokenError):
         verifier.verify(sign(claims, keypair))
-
-
-# ---------------------------------------------------------------------------
-# Key management
-# ---------------------------------------------------------------------------
 
 
 def test_signing_keys_are_fetched_once_for_many_tokens() -> None:
@@ -387,7 +365,6 @@ def test_a_rotated_key_is_picked_up_automatically() -> None:
     old = make_keypair(kid="old")
     verifier, fake = make_verifier(old)
 
-    # Warm the cache with the pre-rotation key set.
     verifier.verify(sign(make_claims(), old))
     assert fake.calls == 1
 
@@ -408,11 +385,6 @@ def test_expired_cache_is_refreshed() -> None:
     verifier.verify(sign(make_claims(), keypair))
 
     assert fake.calls == 2
-
-
-# ---------------------------------------------------------------------------
-# Availability
-# ---------------------------------------------------------------------------
 
 
 def test_jwks_outage_with_a_cold_cache_is_a_503_not_a_401() -> None:
@@ -439,7 +411,7 @@ def test_jwks_outage_with_a_warm_cache_still_verifies() -> None:
     """
     keypair = make_keypair()
     verifier, fake = make_verifier(keypair, ttl_seconds=0.0)
-    verifier.verify(sign(make_claims(), keypair))  # warm the cache
+    verifier.verify(sign(make_claims(), keypair))
 
     fake.error = RuntimeError("connection refused")
     identity = verifier.verify(sign(make_claims(), keypair))
@@ -453,11 +425,6 @@ def test_project_publishing_no_keys_is_an_error_not_a_silent_accept() -> None:
 
     with pytest.raises(AuthServiceUnavailableError):
         verifier.verify(sign(make_claims(), make_keypair()))
-
-
-# ---------------------------------------------------------------------------
-# Header parsing
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -477,11 +444,6 @@ def test_project_publishing_no_keys_is_an_error_not_a_silent_accept() -> None:
 )
 def test_bearer_token_extraction(header: str | None, expected: str | None) -> None:
     assert extract_bearer_token(header) == expected
-
-
-# ---------------------------------------------------------------------------
-# Wiring into the request pipeline
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture

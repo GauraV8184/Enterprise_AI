@@ -26,8 +26,6 @@ from app.rag.loaders import TextBlock
 
 logger = get_logger(__name__)
 
-#: Separators in priority order. The empty string is the final fallback: a hard
-#: character cut for pathological input such as one enormous unbroken token.
 _SEPARATORS = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]
 
 
@@ -57,8 +55,6 @@ def build_splitter(*, chunk_size: int, chunk_overlap: int) -> RecursiveCharacter
     if chunk_overlap < 0:
         raise ValueError("chunk_overlap cannot be negative")
     if chunk_overlap >= chunk_size:
-        # Overlap at or above the chunk size means a window that never advances,
-        # producing overlapping duplicates forever on long input.
         raise ValueError("chunk_overlap must be smaller than chunk_size")
 
     return RecursiveCharacterTextSplitter(

@@ -25,17 +25,10 @@ Environment = Literal["development", "staging", "production", "test"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LlmProvider = Literal["openai", "ollama"]
 
-# Values accepted for LLM_PROVIDER. "ollama" is a convenience alias: Ollama
-# exposes an OpenAI-compatible API, so it reuses the same client and the same
-# OPENAI_* settings, but needs no API key and defaults to a local base URL.
 SUPPORTED_LLM_PROVIDERS = frozenset({"openai", "ollama"})
 
-# Where a local Ollama server listens by default.
 OLLAMA_DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
 
-# ``backend/app/core/config.py`` -> repo root is three parents up. Resolving the
-# .env path absolutely means the app finds the same file no matter which
-# directory uvicorn is launched from.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ENV_FILE = _REPO_ROOT / ".env"
 
@@ -51,46 +44,28 @@ class Settings(BaseSettings):
         env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="ignore",  # tolerate unrelated vars in the environment
+        extra="ignore",
     )
 
-    # --- Application identity ------------------------------------------------
     app_name: str = "Enterprise AI Intelligence Platform"
     app_version: str = "0.1.0"
     environment: Environment = "development"
     debug: bool = False
     api_prefix: str = "/api"
 
-    # --- Logging -------------------------------------------------------------
     log_level: LogLevel = "INFO"
     log_json: bool = True
 
-    # --- CORS ----------------------------------------------------------------
-    # Browser origins allowed to call the API. Defaults to the Vite dev server.
-    # ``NoDecode`` stops pydantic-settings from trying to JSON-decode this field
-    # before our validator sees it, which is what allows the friendlier
-    # comma-separated form (``a,b``) as well as a JSON array.
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
 
-    # --- LLM provider --------------------------------------------------------
-    # ``llm_provider`` selects which client the factory builds. Only "openai" is
-    # implemented today; adding a provider means adding a branch in
-    # ``app/llm/factory.py``, not redesigning the application.
     llm_provider: LlmProvider = "openai"
 
-    # SecretStr keeps the key out of logs, tracebacks and ``repr(settings)``.
-    # Read the real value with ``settings.openai_api_key.get_secret_value()``.
     openai_api_key: SecretStr | None = None
 
-    # Optional: point at an OpenAI-compatible gateway (Azure proxy, LiteLLM,
-    # local vLLM, ...) without changing code.
     openai_base_url: str | None = None
 
-    # Model names change over time. This is deliberately configurable: set
-    # OPENAI_MODEL in .env to any model your key can access. Verify with
-    # ``python scripts/check_llm.py``.
     openai_model: str = "gpt-4o-mini"
 
     llm_temperature: float = 0.0
@@ -98,72 +73,36 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
 
-    # --- Embeddings (Phase 3) ------------------------------------------------
-    # Embeddings are separate from the chat model because a provider may be good
-    # at one and not the other. Defaults to a local Ollama model, which costs
-    # nothing and keeps documents on the machine.
     embedding_provider: Literal["ollama", "openai"] = "ollama"
     embedding_model: str = "nomic-embed-text"
     embedding_batch_size: int = 64
     embedding_timeout_seconds: float = 120.0
-    # Overrides the LLM endpoint/key when set. Left unset, the embedding client
-    # follows embedding_provider's defaults.
     embedding_base_url: str | None = None
 
-    # --- Document storage (Phase 3) ------------------------------------------
-    # Local SQLite for development. Phase 4 adds Supabase/Postgres; the storage
-    # contract is documented in app/database/repositories.py.
     data_dir: Path = Field(default_factory=lambda: _REPO_ROOT / "data")
     max_upload_mb: int = 25
 
-    # --- Retrieval (Phase 3) -------------------------------------------------
     chunk_size: int = 1000
     chunk_overlap: int = 150
     retrieval_top_k: int = 6
     max_context_chars: int = 12000
 
-    # --- Development identity ------------------------------------------------
-    # Phase 3 has no authentication yet (Supabase Auth arrives in Phase 4).
-    # Requests may name a user via the X-User-Id header for local multi-user
-    # testing; without it this id is used. Refused outright in production.
     dev_user_id: str = "dev-user"
 
-    # --- Supabase (Phase 4) --------------------------------------------------
     supabase_url: str | None = None
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None
     supabase_documents_bucket: str = "documents"
-    # Uploads can be slower than a query: the whole file crosses the network
-    # twice (stored, then read back for indexing), so this is deliberately more
-    # generous than the PostgREST timeout.
     storage_timeout_seconds: float = 120.0
 
-    # Full Postgres connection string, used ONLY by scripts/apply_migrations.py.
-    # The application never opens a direct connection: it goes through PostgREST
-    # so that Row Level Security applies to every query. Paste it from
-    # Dashboard -> Connect -> Session pooler (the direct db.<ref> host is
-    # IPv6-only on current projects, so the pooler is the reliable choice).
     supabase_db_url: SecretStr | None = None
 
-    # Which store holds documents and vectors.
-    #   auto     - Supabase when configured, otherwise the local SQLite store
-    #   sqlite   - always the local development store
-    #   supabase - always Supabase; fail at startup if it is not configured
     document_store: Literal["auto", "sqlite", "supabase"] = "auto"
 
-    # Where the original uploaded bytes live.
-    #   auto     - Supabase Storage when the document store uses Supabase
-    #   local    - the local filesystem (development and the offline test suite)
-    #   supabase - always Supabase Storage; fail at startup if it is not configured
     file_storage: Literal["auto", "local", "supabase"] = "auto"
 
-    # Identity source for document endpoints.
-    #   auto     - Supabase Auth when configured, otherwise the dev header stub
-    #   dev      - always the development stub (never allowed in production)
-    #   supabase - always Supabase Auth; fail at startup if it is not configured
     auth_backend: Literal["auto", "dev", "supabase"] = "auto"
 
-    # --- Validators ----------------------------------------------------------
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _parse_cors_origins(cls, value: object) -> object:
@@ -210,7 +149,6 @@ class Settings(BaseSettings):
             )
         return value
 
-    # --- Convenience properties ---------------------------------------------
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
@@ -308,8 +246,6 @@ class Settings(BaseSettings):
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
 
-    # -- Supabase -------------------------------------------------------------
-
     @property
     def supabase_configured(self) -> bool:
         """True when the URL and public key are present."""
@@ -388,20 +324,12 @@ class Settings(BaseSettings):
                 "authenticate callers, and refusing to serve is safer than trusting a header."
             )
         if not self.allows_dev_auth and not self.use_supabase_auth:
-            # Staging is deployed and reachable by real users. The header stub is
-            # only a local convenience; accepting it there would let anyone pick
-            # their own user id and read another tenant's documents.
             raise ValueError(
                 f"ENVIRONMENT={self.environment} requires Supabase Auth. The development "
                 "X-User-Id stub is only allowed in development and test; configure "
                 "SUPABASE_URL and SUPABASE_ANON_KEY (or set AUTH_BACKEND=supabase)."
             )
         if self.use_supabase_store and not self.use_supabase_auth:
-            # The Postgres store sends the caller's access token on every query and
-            # lets RLS decide which rows exist. The development stub supplies no
-            # token, so there would be nothing to send and every query would come
-            # back empty - or, worse, would be run with the anon key if someone
-            # "fixed" it that way. Refuse the combination instead.
             raise ValueError(
                 "DOCUMENT_STORE=supabase requires AUTH_BACKEND=supabase. Every query is sent "
                 "with the caller's own access token so that Row Level Security decides what it "
@@ -409,17 +337,12 @@ class Settings(BaseSettings):
                 "DOCUMENT_STORE=sqlite as well if you want to use the stub."
             )
         if self.use_supabase_storage and not self.use_supabase_auth:
-            # Same argument as above, one layer down: the bucket is private and
-            # its policies key off auth.uid(), so there is no identity to enforce
-            # without a real token.
             raise ValueError(
                 "FILE_STORAGE=supabase requires AUTH_BACKEND=supabase. Storage policies compare "
                 "the object key to the caller's user id, which means a verified token must be "
                 "forwarded. Set FILE_STORAGE=local for the development stub."
             )
         if self.is_production and not self.use_supabase_storage:
-            # A container filesystem is replaced on every deploy and is not shared
-            # between instances. Rows would survive and the originals would not.
             raise ValueError(
                 "ENVIRONMENT=production requires Supabase Storage. Uploads written to the local "
                 "filesystem are lost on redeploy and are invisible to other instances. Remove "

@@ -33,10 +33,6 @@ from tests.fakes import (
     make_timeout_error,
 )
 
-# --------------------------------------------------------------------------
-# build_messages
-# --------------------------------------------------------------------------
-
 
 def test_default_system_prompt_is_prepended() -> None:
     messages = build_messages([{"role": "user", "content": "hi"}])
@@ -76,11 +72,6 @@ def test_unknown_role_is_rejected() -> None:
         build_messages([{"role": "robot", "content": "hi"}])
 
 
-# --------------------------------------------------------------------------
-# generate_answer
-# --------------------------------------------------------------------------
-
-
 async def test_generate_answer_returns_text_and_usage() -> None:
     model = FakeChatModel(
         replies=["Q3 revenue rose 12%."],
@@ -104,7 +95,6 @@ async def test_generate_answer_handles_missing_usage() -> None:
 async def test_generate_answer_normalises_block_content() -> None:
     model = FakeChatModel()
     model.replies = ["ignored"]
-    # Simulate a provider returning content blocks instead of a plain string.
     original = FakeChatModel._generate
 
     def patched(self, messages, stop=None, run_manager=None, **kwargs):
@@ -162,13 +152,7 @@ async def test_provider_errors_are_translated(builder, expected) -> None:
     error = excinfo.value
     assert isinstance(error, AppError)
     assert error.status_code == expected.status_code
-    # The original exception must be chained for the logs.
     assert error.__cause__ is not None
-
-
-# --------------------------------------------------------------------------
-# map_exception
-# --------------------------------------------------------------------------
 
 
 def test_map_exception_passes_app_errors_through() -> None:
@@ -194,7 +178,6 @@ def test_exhausted_quota_is_not_reported_as_a_rate_limit() -> None:
     assert isinstance(error, LlmQuotaExhaustedError)
     assert error.code == "llm_quota_exhausted"
     assert error.details["provider_code"] == "credit_balance_exhausted"
-    # The advice must point at billing, not at waiting.
     assert "retrying will not help" in error.message.lower()
 
 
@@ -233,11 +216,6 @@ def test_cause_chain_does_not_loop_forever_on_cycles() -> None:
     first.__cause__ = second
     second.__cause__ = first
     assert isinstance(map_exception(first), LlmProviderError)
-
-
-# --------------------------------------------------------------------------
-# classify_intent (structured output)
-# --------------------------------------------------------------------------
 
 
 def _intent(**overrides) -> TaskIntent:

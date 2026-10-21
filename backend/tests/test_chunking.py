@@ -118,11 +118,6 @@ def test_unbroken_token_is_hard_split() -> None:
     assert all(chunk.char_count <= 400 for chunk in chunks)
 
 
-# --------------------------------------------------------------------------
-# Configuration guard rails
-# --------------------------------------------------------------------------
-
-
 def test_overlap_larger_than_chunk_size_is_rejected() -> None:
     """This combination never advances the window, so splitting would not terminate."""
     with pytest.raises(ValueError, match="chunk_overlap must be smaller"):

@@ -110,11 +110,6 @@ def corpus(repository: DocumentRepository, embeddings: HashingEmbeddings) -> Doc
     return repository
 
 
-# --------------------------------------------------------------------------
-# Ranking
-# --------------------------------------------------------------------------
-
-
 def test_relevant_passage_ranks_first(
     corpus: DocumentRepository, embeddings: HashingEmbeddings
 ) -> None:
@@ -231,11 +226,6 @@ def test_search_delegates_ranking_to_the_store() -> None:
     assert result.matches[0].citation == "handbook.pdf, page 4 (Leave)"
 
 
-# --------------------------------------------------------------------------
-# Isolation
-# --------------------------------------------------------------------------
-
-
 def test_search_only_covers_your_own_documents(
     corpus: DocumentRepository, embeddings: HashingEmbeddings
 ) -> None:
@@ -250,7 +240,7 @@ def test_search_only_covers_your_own_documents(
     alice = search(corpus, embeddings, owner_id=ALICE, query="annual leave", top_k=10)
 
     assert all(match.filename != "bob-secrets.txt" for match in alice.matches)
-    assert alice.searched_chunks == 3  # Bob's chunk is not even loaded
+    assert alice.searched_chunks == 3
 
 
 def test_search_can_be_limited_to_chosen_documents(
@@ -275,11 +265,6 @@ def test_search_can_be_limited_to_chosen_documents(
     assert result.searched_chunks == 1
 
 
-# --------------------------------------------------------------------------
-# Embedding model changes
-# --------------------------------------------------------------------------
-
-
 def test_changing_embedding_model_fails_instead_of_returning_noise(
     corpus: DocumentRepository, embeddings: HashingEmbeddings
 ) -> None:
@@ -301,11 +286,6 @@ def test_changing_embedding_model_fails_instead_of_returning_noise(
     assert str(embeddings.dimensions) in message
     assert str(DifferentDimensions.dimensions) in message
     assert "EMBEDDING_MODEL" in message
-
-
-# --------------------------------------------------------------------------
-# Context assembly
-# --------------------------------------------------------------------------
 
 
 def _match(index: int, content: str, score: float = 0.9):
@@ -353,11 +333,6 @@ def test_empty_matches_produce_empty_context() -> None:
     assert included == []
 
 
-# --------------------------------------------------------------------------
-# Grounded answering
-# --------------------------------------------------------------------------
-
-
 async def test_answer_is_grounded_in_retrieved_context(
     corpus: DocumentRepository, embeddings: HashingEmbeddings
 ) -> None:
@@ -377,7 +352,6 @@ async def test_answer_is_grounded_in_retrieved_context(
     assert result.sources
     assert result.sources[0].filename == "handbook.pdf"
 
-    # The model must have received the passage it is quoting.
     sent = "\n".join(str(message.content) for message in model.received[0])
     assert "twenty days of paid annual leave" in sent
     assert "[1]" in sent
@@ -482,7 +456,7 @@ async def test_no_match_above_threshold_explains_itself(
     assert result.grounded is False
     assert model.received == []
     assert "No relevant content was found" in result.answer
-    assert result.searched_chunks == 3  # it did search, and says so
+    assert result.searched_chunks == 3
 
 
 async def test_answer_question_rejects_a_blank_question(

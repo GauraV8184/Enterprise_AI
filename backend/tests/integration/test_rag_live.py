@@ -160,7 +160,5 @@ async def test_live_grounded_answer_cites_its_source(
 
     assert answer.grounded is True
     assert answer.sources, "no citation was returned"
-    # The correct figure is twenty days; a model answering from memory would not
-    # know this, so finding it here shows the answer came from the document.
     assert "twenty" in answer.answer.lower() or "20" in answer.answer
     assert "[1]" in answer.answer, f"the model did not cite its source: {answer.answer!r}"

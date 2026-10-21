@@ -31,11 +31,6 @@ ALICE = "alice"
 BOB = "bob"
 
 
-# --------------------------------------------------------------------------
-# Upload and parse
-# --------------------------------------------------------------------------
-
-
 def test_upload_text_file_is_indexed_immediately(
     rag_client: TestClient, documents_dir: Path
 ) -> None:
@@ -129,11 +124,6 @@ def test_path_traversal_in_the_filename_is_neutralised(
     assert response.json()["filename"] == "evil.txt"
 
 
-# --------------------------------------------------------------------------
-# Failed indexing
-# --------------------------------------------------------------------------
-
-
 def test_scanned_pdf_fails_loudly_but_is_still_recorded(
     rag_client: TestClient, documents_dir: Path
 ) -> None:
@@ -152,14 +142,8 @@ def test_scanned_pdf_fails_loudly_but_is_still_recorded(
     assert "no text layer" in stored["error"].lower()
     assert stored["chunk_count"] == 0
 
-    # A failed document must not contribute searchable content.
     searched = rag_client.post("/api/documents/search", json={"query": "anything"}).json()
     assert searched["searched_chunks"] == 0
-
-
-# --------------------------------------------------------------------------
-# Rejected uploads
-# --------------------------------------------------------------------------
 
 
 def test_unsupported_extension_is_rejected(rag_client: TestClient, documents_dir: Path) -> None:
@@ -221,11 +205,6 @@ def test_rejected_upload_creates_no_record(rag_client: TestClient, documents_dir
     upload(rag_client, path)
 
     assert rag_client.get("/api/documents").json()["total"] == 0
-
-
-# --------------------------------------------------------------------------
-# Search
-# --------------------------------------------------------------------------
 
 
 def test_search_finds_the_relevant_document(rag_client: TestClient, documents_dir: Path) -> None:
@@ -293,11 +272,6 @@ def test_search_top_k_is_bounded(rag_client: TestClient) -> None:
     assert response.status_code == 422
 
 
-# --------------------------------------------------------------------------
-# Ask
-# --------------------------------------------------------------------------
-
-
 def test_ask_returns_a_grounded_answer_with_citations(
     rag_client: TestClient, documents_dir: Path, fake_model: FakeChatModel
 ) -> None:
@@ -316,8 +290,6 @@ def test_ask_returns_a_grounded_answer_with_citations(
     assert body["model"]
     assert body["request_id"]
 
-    # The passage the client is told to cite is the passage the model received.
-    # This is the contract that makes the citation verifiable rather than decorative.
     cited = body["sources"][0]["snippet"]
     sent = "\n".join(str(message.content) for message in fake_model.received[0])
     assert cited[:100] in sent
@@ -362,11 +334,6 @@ def test_ask_rejects_a_blank_question(rag_client: TestClient) -> None:
     assert response.status_code == 422
 
 
-# --------------------------------------------------------------------------
-# Delete
-# --------------------------------------------------------------------------
-
-
 def test_delete_removes_the_document_and_its_vectors(
     rag_client: TestClient, documents_dir: Path
 ) -> None:
@@ -378,7 +345,6 @@ def test_delete_removes_the_document_and_its_vectors(
     assert rag_client.get(f"/api/documents/{created['id']}").status_code == 404
     assert rag_client.get("/api/documents").json()["total"] == 0
 
-    # Nothing left to retrieve: orphaned vectors would keep answering.
     searched = rag_client.post("/api/documents/search", json={"query": "annual leave"}).json()
     assert searched["searched_chunks"] == 0
     assert searched["matches"] == []
@@ -386,11 +352,6 @@ def test_delete_removes_the_document_and_its_vectors(
 
 def test_deleting_an_unknown_document_is_404(rag_client: TestClient) -> None:
     assert rag_client.delete("/api/documents/nope").status_code == 404
-
-
-# --------------------------------------------------------------------------
-# Multi-user isolation
-# --------------------------------------------------------------------------
 
 
 def test_one_user_cannot_see_another_users_documents(
@@ -410,7 +371,6 @@ def test_one_user_cannot_see_another_users_documents(
         == 404
     )
 
-    # Alice's document is untouched by Bob's attempts.
     assert (
         rag_client.get(f"/api/documents/{created['id']}", headers={"X-User-Id": ALICE}).status_code
         == 200
@@ -454,11 +414,6 @@ def test_empty_user_header_is_rejected(rag_client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "not_authenticated"
-
-
-# --------------------------------------------------------------------------
-# Original file storage
-# --------------------------------------------------------------------------
 
 
 def test_the_original_is_stored_under_the_owner_and_document(

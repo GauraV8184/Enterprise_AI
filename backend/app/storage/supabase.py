@@ -69,8 +69,6 @@ class SupabaseStorage:
         self._bucket = bucket
         self._timeout = timeout
 
-    # -- contract ----------------------------------------------------------
-
     def put(
         self,
         *,
@@ -102,15 +100,9 @@ class SupabaseStorage:
         try:
             self._request("DELETE", self._object_path(key))
         except FileStoreObjectMissingError:
-            # Idempotent by contract: the object the caller wanted gone is gone.
             logger.info("storage_object_already_absent", extra=safe_extra(document_id=document_id))
 
-    # -- plumbing ----------------------------------------------------------
-
     def _object_path(self, key: str) -> str:
-        # Each segment is percent-encoded; "/" stays because it separates the
-        # owner, document and filename segments. Without this, a filename such as
-        # "q3 #1?.pdf" would truncate the path at the fragment/query marker.
         return f"/object/{quote(self._bucket, safe='')}/{quote(key, safe='/')}"
 
     def _request(
@@ -163,18 +155,12 @@ class SupabaseStorage:
             ),
         )
 
-        # Verified locally before the call, so a 401 here means the token was
-        # revoked or expired in between; either way the caller needs a new one.
         if response.status_code == 401:
             raise InvalidTokenError()
         if response.status_code == 403:
-            # The policies refused the key. The database is doing its job.
             raise AccessDeniedError()
         if "bucket not found" in lowered:
             raise FileStoreNotReadyError()
-        # Unlike PostgREST, Storage reports policy violations as 400, with one of
-        # these messages. Treating them as a server error would turn a correct
-        # refusal into a 500 and hide the fact that isolation is working.
         if (
             "row-level security" in lowered
             or lowered == "access denied"

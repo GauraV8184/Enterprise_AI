@@ -25,10 +25,6 @@ from tests.sample_files import (
     write_xlsx_file,
 )
 
-# --------------------------------------------------------------------------
-# PDF
-# --------------------------------------------------------------------------
-
 
 def test_pdf_pages_keep_their_numbers(documents_dir: Path) -> None:
     """Page provenance is what makes a citation verifiable."""
@@ -44,7 +40,6 @@ def test_pdf_text_is_actually_extracted(documents_dir: Path) -> None:
 
     assert "twenty days of paid annual leave" in loaded.blocks[0].text
     assert "work remotely" in loaded.blocks[1].text
-    # Page 3 comes from a different source document - proving pages are not copies.
     assert "4,820,000" in loaded.blocks[2].text
     assert REVENUE_REPORT_TEXT.split()[1] in loaded.blocks[2].text
 
@@ -67,11 +62,6 @@ def test_pdf_parser_failure_does_not_leak_the_storage_path(documents_dir: Path) 
     assert str(path) not in message
     assert str(documents_dir) not in message
     assert "quarterly.pdf" in message
-
-
-# --------------------------------------------------------------------------
-# Plain text and Markdown
-# --------------------------------------------------------------------------
 
 
 def test_text_file_is_one_block(documents_dir: Path) -> None:
@@ -101,7 +91,6 @@ def test_markdown_headings_become_nested_sections(documents_dir: Path) -> None:
         "Operations Guide > Change management",
     ]
     assert "fifteen minutes" in loaded.blocks[0].text
-    # The heading text belongs to the section label, not to the body.
     assert not loaded.blocks[0].text.startswith("#")
 
 
@@ -110,11 +99,6 @@ def test_empty_text_file_has_no_blocks(documents_dir: Path) -> None:
     path.write_text("   \n\n  ", encoding="utf-8")
     with pytest.raises(NoExtractableTextError):
         load_document(path)
-
-
-# --------------------------------------------------------------------------
-# CSV
-# --------------------------------------------------------------------------
 
 
 def test_csv_rows_become_text_with_headers(documents_dir: Path) -> None:
@@ -134,7 +118,7 @@ def test_csv_header_repeats_across_blocks(documents_dir: Path) -> None:
 
     loaded = load_document(path)
 
-    assert len(loaded.blocks) == 3  # 120 rows / 50 per block
+    assert len(loaded.blocks) == 3
     for block in loaded.blocks:
         assert block.text.startswith("name | value")
 
@@ -148,11 +132,6 @@ def test_semicolon_csv_is_detected(documents_dir: Path) -> None:
 
     assert loaded.blocks[0].text.startswith("region | units")
     assert "North | 1200" in loaded.blocks[0].text
-
-
-# --------------------------------------------------------------------------
-# Excel
-# --------------------------------------------------------------------------
 
 
 def test_xlsx_sheets_become_sections(documents_dir: Path) -> None:
@@ -183,17 +162,11 @@ def test_xlsx_missing_values_are_blank_not_nan(documents_dir: Path) -> None:
     assert "nan" not in loaded.blocks[0].text.lower()
 
 
-# --------------------------------------------------------------------------
-# DOCX
-# --------------------------------------------------------------------------
-
-
 def test_docx_headings_become_sections(documents_dir: Path) -> None:
     loaded = load_document(write_docx_file(documents_dir))
 
     sections = [block.section for block in loaded.blocks]
     assert "Security Policy" in sections
-    # A sub-heading keeps its parent so it is unambiguous on its own.
     assert "Security Policy > Device encryption" in sections
 
 
@@ -222,11 +195,6 @@ def test_docx_preserves_element_order(documents_dir: Path) -> None:
     assert table_index > prose_index
 
 
-# --------------------------------------------------------------------------
-# Dispatch
-# --------------------------------------------------------------------------
-
-
 def test_unsupported_extension_is_rejected_by_the_loader(documents_dir: Path) -> None:
     path = documents_dir / "archive.zip"
     path.write_bytes(b"PK\x03\x04")
@@ -236,21 +204,11 @@ def test_unsupported_extension_is_rejected_by_the_loader(documents_dir: Path) ->
     assert ".zip" in str(excinfo.value)
 
 
-# --------------------------------------------------------------------------
-# Cosine similarity
-# --------------------------------------------------------------------------
-
-
 def test_cosine_similarity_ranks_by_direction() -> None:
     matrix = np.array([[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]], dtype=np.float32)
     scores = cosine_similarity_matrix(matrix, np.array([1.0, 0.0], dtype=np.float32))
 
     assert scores[0] > scores[2] > scores[1]
-
-
-# --------------------------------------------------------------------------
-# The fake embedding's own guarantees
-# --------------------------------------------------------------------------
 
 
 def test_fake_embedding_prefers_shared_vocabulary() -> None:
@@ -275,8 +233,6 @@ def test_fake_embedding_prefers_shared_vocabulary() -> None:
     )
 
     assert scores[0] > scores[1]
-    # A genuine signal, not a hairline margin: three shared terms should dominate
-    # any accidental hash collision.
     assert scores[0] > scores[1] * 2
 
 

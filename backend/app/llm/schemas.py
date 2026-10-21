@@ -13,11 +13,11 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 IntentKind = Literal[
-    "general_chat",  # conversational, needs no tools
-    "document_question",  # answerable from internal documents (RAG)
-    "data_analysis",  # needs authorized business data / SQL / pandas
-    "research",  # needs external web research
-    "report",  # multi-step: gather evidence and produce a report
+    "general_chat",
+    "document_question",
+    "data_analysis",
+    "research",
+    "report",
 ]
 
 

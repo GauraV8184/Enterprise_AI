@@ -57,11 +57,6 @@ def make_chunk(
     )
 
 
-# --------------------------------------------------------------------------
-# Lifecycle
-# --------------------------------------------------------------------------
-
-
 def test_created_document_starts_pending(repository: DocumentRepository) -> None:
     record = make_document(repository)
 
@@ -146,11 +141,6 @@ def test_listing_is_newest_first(repository: DocumentRepository) -> None:
     assert [record.id for record in listed] == [second.id, first.id]
 
 
-# --------------------------------------------------------------------------
-# Owner isolation
-# --------------------------------------------------------------------------
-
-
 def test_document_is_invisible_to_another_owner(repository: DocumentRepository) -> None:
     record = make_document(repository, owner=ALICE)
 
@@ -199,11 +189,6 @@ def test_vectors_are_never_returned_to_another_owner(repository: DocumentReposit
     assert matrix.size == 0
 
 
-# --------------------------------------------------------------------------
-# Vectors
-# --------------------------------------------------------------------------
-
-
 def test_chunks_round_trip_with_embeddings(repository: DocumentRepository) -> None:
     record = make_document(repository)
     vector = [0.1, 0.2, 0.3, 0.4]
@@ -215,10 +200,9 @@ def test_chunks_round_trip_with_embeddings(repository: DocumentRepository) -> No
 
     assert len(chunks) == 1
     assert chunks[0].content == "hello world"
-    assert chunks[0].filename == record.filename  # joined from the document row
+    assert chunks[0].filename == record.filename
     assert matrix is not None
     assert matrix.shape == (1, 4)
-    # float32 storage rounds, so compare approximately.
     assert np.allclose(matrix[0], np.array(vector, dtype=np.float32))
 
 

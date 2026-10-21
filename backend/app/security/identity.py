@@ -119,9 +119,6 @@ def get_current_user(request: Request) -> UserIdentity:
     if settings.use_supabase_auth:
         verifier: TokenVerifier | None = getattr(request.app.state, "token_verifier", None)
         if verifier is None:
-            # Configured for Supabase Auth but the verifier never got built. Fail
-            # closed rather than degrading to the stub, which would mean silently
-            # trusting a header in an environment that asked for real auth.
             raise AuthenticationNotAvailableError(
                 "Supabase Auth is configured but no token verifier was initialised."
             )
@@ -135,10 +132,6 @@ def get_current_user(request: Request) -> UserIdentity:
         return verifier.verify(token)
 
     if not settings.allows_dev_auth:
-        # Reachable only when a deployed environment was configured without
-        # Supabase Auth, which startup validation rejects. Kept as a second line
-        # of defence: serving an unverified header outside development would be
-        # worse than not serving at all.
         raise AuthenticationNotAvailableError()
 
     user_id, source = _resolve_dev_user_id(settings, request)

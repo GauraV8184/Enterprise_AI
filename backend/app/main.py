@@ -47,7 +47,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url="/redoc" if not settings.is_production else None,
         openapi_url="/openapi.json" if not settings.is_production else None,
     )
-    # Settings are read per-request from app.state; see app/api/deps.py.
     app.state.settings = settings
 
     app.add_middleware(
@@ -63,7 +62,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_error_handlers(app)
 
     app.include_router(api_router, prefix=settings.api_prefix)
-    # Also serve "/" so a bare visit to the host shows useful metadata.
     app.include_router(api_router)
 
     logger.info(
@@ -90,8 +88,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings: Settings = app.state.settings
 
-    # Before anything is built: an explicit backend without credentials, or a
-    # Postgres store with no authenticated identity to forward, cannot serve.
     settings.validate_supabase_expectations()
 
     app.state.supabase_http = None
@@ -118,11 +114,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             ),
         )
 
-    # The document store is created even without an LLM: listing and deleting
-    # already-uploaded documents must keep working while a provider is down.
     if settings.use_supabase_store or settings.use_supabase_storage:
-        # One pooled client shared by every request. The token is not held here -
-        # each request builds its own client around this pool.
         app.state.supabase_http = httpx.Client(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
@@ -165,8 +157,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    # Connections here are opened per operation, so there is nothing to drain. The
-    # references are dropped so nothing outlives the application instance.
     if app.state.supabase_http is not None:
         app.state.supabase_http.close()
         app.state.supabase_http = None
@@ -187,8 +177,6 @@ def _register_request_context(app: FastAPI) -> None:
         try:
             response = await call_next(request)
         except Exception:
-            # Expected failures are handled by register_error_handlers; log here
-            # so every failure is still correlated with the request id.
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             logger.exception(
                 "request_failed",

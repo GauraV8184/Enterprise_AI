@@ -48,11 +48,6 @@ TIMEOUT = 30.0
 EMBEDDING_DIMS = 768
 
 
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class Report:
     passed: int = 0
@@ -74,11 +69,6 @@ class Report:
         else:
             self.fail(message, detail)
         return condition
-
-
-# ---------------------------------------------------------------------------
-# HTTP helpers
-# ---------------------------------------------------------------------------
 
 
 class Client:
@@ -115,8 +105,6 @@ class Client:
             headers["Prefer"] = prefer
         return headers
 
-    # -- auth ------------------------------------------------------------
-
     def create_user(self, email: str, password: str) -> str:
         response = self._http.post(
             self._url("auth", "/admin/users"),
@@ -142,8 +130,6 @@ class Client:
         )
         response.raise_for_status()
 
-    # -- data ------------------------------------------------------------
-
     def rest(
         self,
         method: str,
@@ -162,8 +148,6 @@ class Client:
 
     def rpc(self, name: str, token: str | None, body: dict[str, Any]) -> httpx.Response:
         return self.rest("POST", f"/rpc/{name}", token, body=body)
-
-    # -- storage ---------------------------------------------------------
 
     def upload(self, path: str, token: str, content: bytes, content_type: str) -> httpx.Response:
         return self._http.post(
@@ -199,11 +183,6 @@ class Client:
                 "Authorization": f"Bearer {token or self._service}",
             },
         )
-
-
-# ---------------------------------------------------------------------------
-# Data helpers
-# ---------------------------------------------------------------------------
 
 
 def unit_vector(seed: int, dims: int = EMBEDDING_DIMS) -> list[float]:
@@ -253,11 +232,6 @@ def error_code(response: httpx.Response) -> str:
     return str(body.get("code", "")) if isinstance(body, dict) else ""
 
 
-# ---------------------------------------------------------------------------
-# The checks
-# ---------------------------------------------------------------------------
-
-
 def run(settings: Settings) -> int:
     report = Report()
     client = Client(settings)
@@ -267,7 +241,6 @@ def run(settings: Settings) -> int:
     password = f"rls-check-{suffix}"
 
     try:
-        # -- 1. two real users ------------------------------------------------
         print("\n1) Create two throwaway users")
         print("-" * 62)
         for label in ("a", "b"):
@@ -285,7 +258,6 @@ def run(settings: Settings) -> int:
         alice, bob = users["a"], users["b"]
         alice_token, bob_token = tokens["a"], tokens["b"]
 
-        # -- 2. A stores and searches ----------------------------------------
         print("\n2) User A stores a document and two vectors")
         print("-" * 62)
         document_response = client.rest(
@@ -310,7 +282,6 @@ def run(settings: Settings) -> int:
         document_id = document["id"]
 
         near_vector = unit_vector(1)
-        # ~0.8 similar to the query: a real hit, not a coin flip around the floor.
         related_vector = blend(near_vector, unit_vector(2), 0.8, 0.6)
         chunks_response = client.rest(
             "POST",
@@ -376,7 +347,6 @@ def run(settings: Settings) -> int:
                     f"(got {float(second['similarity']):.4f})",
                 )
 
-        # -- 3. B sees nothing -----------------------------------------------
         print("\n3) User B tries to read A's data")
         print("-" * 62)
         listing = client.rest("GET", "/documents?select=*", bob_token)
@@ -413,7 +383,6 @@ def run(settings: Settings) -> int:
             search_as_b.text,
         )
 
-        # -- 4. B cannot delete A's document ---------------------------------
         print("\n4) User B tries to destroy A's data")
         print("-" * 62)
         deleted = client.rest(
@@ -434,7 +403,6 @@ def run(settings: Settings) -> int:
             still_there.text,
         )
 
-        # -- 5. B cannot write as A ------------------------------------------
         print("\n5) User B tries to write rows attributed to A")
         print("-" * 62)
         impostor = client.rest(
@@ -455,7 +423,6 @@ def run(settings: Settings) -> int:
             impostor.text,
         )
 
-        # -- 6. B cannot attach a chunk to A's document ----------------------
         print("\n6) User B tries to attach a chunk to A's document")
         print("-" * 62)
         hijack = client.rest(
@@ -476,7 +443,6 @@ def run(settings: Settings) -> int:
             hijack.text,
         )
 
-        # -- 7. anon reaches nothing -----------------------------------------
         print("\n7) The public anon role gets nothing")
         print("-" * 62)
         for table in ("documents", "chunks"):
@@ -487,7 +453,6 @@ def run(settings: Settings) -> int:
                 anonymous.text,
             )
 
-        # -- 8. storage policies ---------------------------------------------
         print("\n8) Storage bucket isolation")
         print("-" * 62)
         object_path = f"{alice}/{document_id}/alices-private-notes.txt"
@@ -510,12 +475,9 @@ def run(settings: Settings) -> int:
         )
 
     finally:
-        # -- cleanup ---------------------------------------------------------
         print("\n9) Cleanup")
         print("-" * 62)
         if object_path:
-            # Storage objects do not cascade from auth.users, so the key has to
-            # be removed explicitly or it becomes an orphan in the bucket.
             try:
                 removed = client.delete_object(object_path)
                 if removed.status_code < 400:

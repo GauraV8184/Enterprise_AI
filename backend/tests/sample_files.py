@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Text chosen so retrieval tests have distinguishable, non-overlapping vocabulary.
 HANDBOOK_PAGE_ONE = (
     "Employee Handbook\n\n"
     "Section 1: Annual leave\n"
@@ -38,8 +37,6 @@ REVENUE_REPORT_TEXT = (
     "segment contributed 1,720,000 dollars. Gross margin held at sixty-one percent."
 )
 
-# Deliberately shares no distinctive vocabulary with the texts above, so ranking
-# tests cannot pass by accident.
 LAPTOP_SECURITY_TEXT = (
     "Device Security Standard\n\n"
     "All laptops issued to staff must have full-disk encryption enabled and a screen "
@@ -158,8 +155,6 @@ def write_pdf_file(
             fontname="helv",
             fontsize=11,
         )
-        # A negative return value means the text did not fit. Silently storing a
-        # truncated page would make later assertions about page content misleading.
         if result < 0:
             raise RuntimeError(f"Sample PDF text did not fit on page {index + 1}")
 
@@ -175,7 +170,6 @@ def write_scanned_style_pdf(directory: Path, name: str = "scanned.pdf") -> Path:
     path = directory / name
     document = pymupdf.open()
     page = document.new_page()
-    # Draw shapes but insert no text, so extraction returns nothing.
     page.draw_rect(pymupdf.Rect(100, 100, 400, 300), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
     document.save(str(path))
     document.close()

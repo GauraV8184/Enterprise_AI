@@ -124,7 +124,6 @@ def _catalog_audit(settings: Settings, blockers: list[str]) -> None:
         else:
             _line("anon privileges", "none (correct)")
 
-        # TRUNCATE is the dangerous one: it is not filtered by row security.
         extras = connection.execute(
             """
             select distinct privilege_type
@@ -213,13 +212,9 @@ def main() -> int:
     anon_headers = {"apikey": anon, "Authorization": f"Bearer {anon}"}
 
     with httpx.Client(timeout=TIMEOUT) as client:
-        # -- 1. Project reachable, and schema state ------------------------
         print("\n1) REST API (PostgREST)")
         print("-" * 62)
         try:
-            # The PostgREST root document requires elevated privileges, so the auth
-            # service is used as the liveness probe instead - it answers with the
-            # project's GoTrue version and is safe to call with the public key.
             alive = client.get(
                 f"{settings.supabase_service_url('auth')}/health", headers=anon_headers
             )
@@ -234,10 +229,6 @@ def main() -> int:
             print("\nRESULT: FAILED - the project is not answering.")
             return 1
 
-        # -- 1b. Service-role key -----------------------------------------
-        # Checked first because the schema probes below prefer it: it always has
-        # access, so a missing table reports as "missing" rather than as a
-        # permission error.
         print("\n1b) Service-role key")
         print("-" * 62)
         admin_headers: dict[str, str] | None = None
@@ -262,7 +253,6 @@ def main() -> int:
                 _line("GET /rest/v1/ with admin key", f"FAILED {type(exc).__name__}")
                 admin_headers = None
 
-        # -- 1c. Tables ----------------------------------------------------
         print("\n1c) Tables")
         print("-" * 62)
         schema_probe_headers = admin_headers or anon_headers
@@ -281,10 +271,6 @@ def main() -> int:
             elif probe.status_code == 200:
                 _line("  rows", len(probe.json()))
 
-        # -- 1d. Row Level Security ---------------------------------------
-        # The very same query, this time as the public `anon` role. It must see
-        # nothing: either refused outright (anon holds no table grants, which is
-        # what migration 0001 arranges) or an empty result set.
         print("\n1d) Row Level Security (probing as the public anon role)")
         print("-" * 62)
         for table in ("documents", "chunks"):
@@ -308,11 +294,6 @@ def main() -> int:
                 else:
                     _line(f"anon reading '{table}'", "0 rows visible (correct)")
 
-        # -- 2. Vector search function ------------------------------------
-        # Existence is checked with an administrative key, because the anon key
-        # is (correctly) not granted EXECUTE. That the function *respects RLS* is
-        # a different claim, tested against a real signed-in user later - an
-        # empty table would make a leak look identical to correct behaviour.
         print("\n2) Vector search RPCs")
         print("-" * 62)
         rpc_headers = {**(admin_headers or anon_headers), "Content-Type": "application/json"}
@@ -344,7 +325,6 @@ def main() -> int:
                     "The embedding_dimensions() function does not exist - apply the migration."
                 )
 
-        # -- 3. Auth service and signing scheme ---------------------------
         print("\n3) Auth service")
         print("-" * 62)
         try:
@@ -399,7 +379,6 @@ def main() -> int:
                 "verifies tokens locally and cannot authenticate anyone without it."
             )
 
-        # -- 4. Storage ---------------------------------------------------
         print("\n4) Storage")
         print("-" * 62)
         if not settings.supabase_admin_configured:
@@ -438,9 +417,6 @@ def main() -> int:
                             "exist yet - apply the storage migration."
                         )
                     elif bucket.get("public") is not False:
-                        # Storage exposes public buckets over an unauthenticated URL, so a
-                        # public bucket would make every uploaded document world-readable
-                        # regardless of the app's own authorization.
                         _line("bucket is private", "NO - publicly readable")
                         blockers.append(
                             f"The '{settings.supabase_documents_bucket}' bucket is public. "
@@ -456,7 +432,6 @@ def main() -> int:
                     "existence and privacy could not be verified."
                 )
 
-    # -- 5. Catalog audit --------------------------------------------------
     print("\n5) Catalog audit (RLS, privileges, functions)")
     print("-" * 62)
     _catalog_audit(settings, blockers)

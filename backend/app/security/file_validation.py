@@ -51,17 +51,10 @@ class FileType:
 
     extension: str
     label: str
-    #: How the bytes are verified. ``zip`` means "must be a real Office archive".
     sniff: str
-    #: Server-chosen type sent to storage and recorded in the database. Never the
-    #: browser's ``Content-Type``: that header is attacker-controlled, and the
-    #: bucket's MIME allow-list would then be checking a claim rather than a fact.
     mime_type: str
 
 
-#: Everything the parsers in ``app.rag.loaders`` can actually handle. Keeping
-#: this list next to the loader implementations is deliberate: an entry here
-#: without a matching parser would be a bug that uploads would hit at runtime.
 SUPPORTED_TYPES: dict[str, FileType] = {
     ".pdf": FileType(".pdf", "PDF document", "pdf", "application/pdf"),
     ".docx": FileType(
@@ -98,11 +91,9 @@ def normalize_filename(raw: str | None) -> str:
     if raw is None or not raw.strip():
         raise InvalidFileError("The upload is missing a filename.")
 
-    # Tolerate Windows separators, which PurePosixPath would not split on.
     normalized = raw.replace("\\", "/").strip()
     name = PurePosixPath(normalized).name
 
-    # Strip control characters and any leading dots (hidden-file tricks).
     name = "".join(char for char in name if char.isprintable()).strip().lstrip(".")
 
     if not name:
@@ -182,7 +173,6 @@ def validate_upload(*, filename: str | None, data: bytes, max_bytes: int) -> Fil
         raise FileTooLargeError(f"The file is larger than the {limit_mb:.0f} MB limit.")
 
     if file_type.sniff == "pdf":
-        # Some producers emit leading whitespace or a BOM before %PDF-.
         if PDF_MAGIC not in data[:1024]:
             raise InvalidFileError(f"'{safe_name}' has a .pdf extension but is not a PDF file.")
 

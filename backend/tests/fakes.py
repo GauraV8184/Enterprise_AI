@@ -88,11 +88,6 @@ class FakeChatModel(BaseChatModel):
         return RunnableLambda(produce)
 
 
-# --------------------------------------------------------------------------
-# Fake embeddings
-# --------------------------------------------------------------------------
-
-
 class HashingEmbeddings(Embeddings):
     """A real ``Embeddings`` implementation with no model behind it.
 
@@ -122,8 +117,6 @@ class HashingEmbeddings(Embeddings):
 
         norm = sum(value * value for value in vector) ** 0.5
         if norm == 0.0:
-            # An empty string would otherwise be an all-zero vector, which has no
-            # direction and cannot be compared with anything.
             vector[0] = 1.0
             return vector
         return [value / norm for value in vector]
@@ -135,9 +128,6 @@ class HashingEmbeddings(Embeddings):
         return self._vector(text)
 
 
-# --------------------------------------------------------------------------
-# Provider exception builders (mirror what the openai SDK raises in production)
-# --------------------------------------------------------------------------
 _API_URL = "https://api.openai.com/v1/chat/completions"
 
 

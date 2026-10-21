@@ -144,10 +144,6 @@ def upload_document(
             data=data,
             content_type=file_type.mime_type,
         )
-        # Read the object back rather than indexing the buffer we still hold. It
-        # costs one download, but it proves the write succeeded and that the
-        # caller's read policy admits the object - before any vectors exist. It
-        # is also exactly what a background indexer will have to do.
         stored = file_store.read(
             owner_id=user.user_id,
             document_id=record.id,
@@ -178,8 +174,6 @@ def upload_document(
             chunk_overlap=settings.chunk_overlap,
         )
     except AppError as exc:
-        # The record survives as "failed" so the user can see and delete it. Its id
-        # travels with the error so a client can act on it without re-listing.
         exc.details = {**exc.details, "document_id": record.id, "status": STATUS_FAILED}
         raise
 

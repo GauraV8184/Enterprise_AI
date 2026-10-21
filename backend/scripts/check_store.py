@@ -30,10 +30,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx  # noqa: E402
 import numpy as np  # noqa: E402
 
-# The live plumbing (user creation, sign-in, reporting) lives in check_rls.py.
-# Importing it rather than copying it keeps one definition of how a throwaway
-# Supabase user is made - and that script is import-safe: its work is behind
-# __main__.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_rls import Client, Report, unit_vector  # noqa: E402
 
@@ -111,7 +107,6 @@ def run(settings: Settings, report: Report) -> None:
         leave_vector = unit_vector(seed=11)
         laptop_vector = unit_vector(seed=12)
 
-        # -- 1. create ---------------------------------------------------
         leave_doc = repo_a.create_document(
             owner_id=user_a,
             filename="handbook.txt",
@@ -130,7 +125,6 @@ def run(settings: Settings, report: Report) -> None:
             size_bytes=512,
         )
 
-        # -- 2. vectors --------------------------------------------------
         inserted = repo_a.add_chunks(
             [
                 chunk_for(
@@ -147,8 +141,6 @@ def run(settings: Settings, report: Report) -> None:
             "both chunks are countable",
         )
 
-        # A vector of the wrong width must be rejected by the database and must
-        # not leave a partial row behind.
         try:
             repo_a.add_chunks(
                 [
@@ -176,7 +168,6 @@ def run(settings: Settings, report: Report) -> None:
             "the rejected insert stored nothing",
         )
 
-        # -- 3. lifecycle ------------------------------------------------
         updated = repo_a.update_status(
             owner_id=user_a,
             document_id=leave_doc.id,
@@ -201,7 +192,6 @@ def run(settings: Settings, report: Report) -> None:
             "A lists exactly their own two documents",
         )
 
-        # -- 4. search ---------------------------------------------------
         result = repo_a.search_chunks(owner_id=user_a, query_embedding=leave_vector, top_k=5)
         report.check(len(result.matches) == 2, "search returns every passage in scope")
         report.check(
@@ -230,7 +220,6 @@ def run(settings: Settings, report: Report) -> None:
         )
         report.check(scoped.searched_chunks == 1, "the scope count follows the filter")
 
-        # -- 5. isolation through the repository -------------------------
         report.check(
             repo_b.get_document(owner_id=user_b, document_id=leave_doc.id) is None,
             "B cannot read A's document by id",
@@ -254,13 +243,11 @@ def run(settings: Settings, report: Report) -> None:
             "A's document survived B's delete",
         )
 
-        # -- 6. malformed input ------------------------------------------
         report.check(
             repo_a.get_document(owner_id=user_a, document_id="not-a-uuid") is None,
             "a malformed id is a 404, not a database error",
         )
 
-        # -- 7. delete + cascade -----------------------------------------
         report.check(
             repo_a.delete_document(owner_id=user_a, document_id=leave_doc.id) is True,
             "A can delete their own document",
@@ -289,8 +276,6 @@ def run(settings: Settings, report: Report) -> None:
 
 def main() -> int:
     settings = Settings()
-    # Without this the logger has no handlers and a rejected request prints only
-    # its message - the PostgREST detail, which is the whole point, would be lost.
     setup_logging(settings)
     print("=" * 78)
     print("Supabase document store - live check")

@@ -134,8 +134,6 @@ def _extract_usage(message: BaseMessage) -> TokenUsage | None:
     )
 
 
-# Provider codes that mean "out of credits/quota" rather than "slow down".
-# OpenAI reports both as HTTP 429, which is why the body must be inspected.
 _QUOTA_ERROR_CODES = frozenset(
     {
         "insufficient_quota",
@@ -182,9 +180,6 @@ def _classify_rate_limit(exc: RateLimitError) -> AppError:
     return LlmRateLimitError(details={"provider_code": code or error_type or "unknown"})
 
 
-# Specific provider errors worth recovering from a wrapper's cause chain.
-# The generic APIError is deliberately excluded: it carries no extra detail, so
-# digging for it would not improve the classification.
 _KNOWN_PROVIDER_ERRORS = (
     AuthenticationError,
     PermissionDeniedError,
@@ -235,13 +230,10 @@ def map_exception(exc: BaseException) -> AppError:
     if isinstance(exc, OutputParserException):
         return LlmStructuredOutputError()
     if isinstance(exc, APIStatusError):
-        # Record the provider's HTTP status (a number, safe to expose) but never
-        # the response body, which may echo request content.
         return LlmProviderError(details={"provider_status": exc.status_code})
     if isinstance(exc, APIError):
         return LlmProviderError()
 
-    # A wrapper may have hidden the real provider error - look for it.
     cause = _find_provider_cause(exc)
     if cause is not None:
         return map_exception(cause)
@@ -265,8 +257,6 @@ async def generate_answer(
 
     runnable: Any = model
     if temperature is not None:
-        # ``bind`` passes the override to the provider without mutating the
-        # shared client instance held on app.state.
         runnable = model.bind(temperature=temperature)
 
     try:
@@ -328,7 +318,6 @@ async def classify_intent(
         raise mapped from exc
 
     if not isinstance(result, TaskIntent):
-        # Providers using a "tool calling" strategy can return a dict.
         try:
             return TaskIntent.model_validate(result)
         except Exception as exc:  # noqa: BLE001

@@ -111,7 +111,6 @@ def test_an_owner_id_cannot_escape_the_root(owner_id: str) -> None:
 def test_storage_filename_keeps_the_extension_and_stays_readable() -> None:
     assert storage_filename("Q3 report #1.txt") == "Q3-report-1.txt"
     assert storage_filename("REPORT") == "REPORT"
-    # Nothing usable is left, so a stable fallback is better than an empty key.
     assert storage_filename("报告.pdf") == "file.pdf"
 
 

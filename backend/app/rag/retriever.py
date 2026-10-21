@@ -32,12 +32,8 @@ from app.llm.service import TokenUsage, generate_answer
 
 logger = get_logger(__name__)
 
-#: Chunks below this cosine similarity are almost always unrelated. Small local
-#: embedding models put unrelated text around 0.5-0.65 and related text above
-#: ~0.7, so a low floor removes obvious noise without discarding real hits.
 DEFAULT_MIN_SCORE = 0.0
 
-#: Characters of a chunk shown in a citation snippet.
 SNIPPET_CHARS = 280
 
 
@@ -216,9 +212,6 @@ async def answer_question(
         raise EmptyQueryError("The question must not be blank.")
 
     query_vector = np.asarray(await embeddings.aembed_query(cleaned), dtype=np.float32)
-    # The store is synchronous: psycopg and PostgREST do blocking I/O. Calling it
-    # directly from this coroutine would stall the event loop for every other
-    # request for the duration of the query.
     result = await run_in_threadpool(
         repository.search_chunks,
         owner_id=owner_id,
@@ -230,7 +223,6 @@ async def answer_question(
     candidates = [_to_retrieved(match) for match in result.matches]
 
     if not candidates:
-        # Two different empty outcomes, and they mean different things to the user.
         if result.searched_chunks == 0:
             answer = (
                 "No documents have been indexed yet, so this cannot be answered from your "

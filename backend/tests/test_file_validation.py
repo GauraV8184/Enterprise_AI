@@ -27,11 +27,6 @@ from tests.sample_files import (
 ONE_MB = 1024 * 1024
 
 
-# --------------------------------------------------------------------------
-# Filename safety
-# --------------------------------------------------------------------------
-
-
 def test_path_components_are_discarded() -> None:
     """A traversal attempt must not survive into the display name."""
     assert normalize_filename("../../../etc/passwd") == "passwd"
@@ -69,11 +64,6 @@ def test_overlong_filename_is_rejected() -> None:
         normalize_filename("a" * 300 + ".pdf")
 
 
-# --------------------------------------------------------------------------
-# Extension handling
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("extension", sorted(SUPPORTED_TYPES))
 def test_supported_extensions_are_recognised(extension: str) -> None:
     assert detect_extension(f"file{extension}") == extension
@@ -88,17 +78,12 @@ def test_unknown_extension_lists_what_is_supported() -> None:
         detect_extension("malware.exe")
     message = str(excinfo.value)
     assert ".exe" in message
-    assert ".pdf" in message  # tells the caller what to send instead
+    assert ".pdf" in message
 
 
 def test_missing_extension_is_rejected() -> None:
     with pytest.raises(UnsupportedFileTypeError):
         detect_extension("README")
-
-
-# --------------------------------------------------------------------------
-# Size
-# --------------------------------------------------------------------------
 
 
 def test_oversized_upload_is_rejected() -> None:
@@ -114,11 +99,6 @@ def test_upload_at_the_limit_is_accepted() -> None:
 def test_empty_upload_is_rejected() -> None:
     with pytest.raises(InvalidFileError):
         validate_upload(filename="empty.txt", data=b"", max_bytes=ONE_MB)
-
-
-# --------------------------------------------------------------------------
-# Content sniffing
-# --------------------------------------------------------------------------
 
 
 def test_genuine_files_pass_validation(documents_dir: Path) -> None:

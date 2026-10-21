@@ -15,7 +15,6 @@ import asyncio
 import sys
 from pathlib import Path
 
-# Allow running as a plain script from the backend directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings  # noqa: E402

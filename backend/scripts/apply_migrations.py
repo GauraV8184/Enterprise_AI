@@ -42,11 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import Settings  # noqa: E402
 
-#: Repository-root ``supabase/migrations``, found relative to this file so the
-#: script works from any working directory.
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
 
-#: Arbitrary but fixed: identifies this script's lock so two runs cannot interleave.
 ADVISORY_LOCK_KEY = 8_274_119_003_771
 
 _MIGRATIONS_TABLE = """
@@ -99,8 +96,6 @@ def _connect(settings: Settings):
         )
 
     dsn = settings.supabase_db_url.get_secret_value()
-    # The pooler and direct hosts both require TLS; state it rather than relying
-    # on the server to insist.
     return psycopg.connect(dsn, sslmode="require", autocommit=True)
 
 
@@ -129,7 +124,6 @@ def main(argv: list[str] | None = None) -> int:
 
     connection = _connect(settings)
     with connection:
-        # Serialise concurrent runs. Released automatically when the session ends.
         connection.execute("select pg_advisory_lock(%s)", (ADVISORY_LOCK_KEY,))
 
         connection.execute(_MIGRATIONS_TABLE)
@@ -161,8 +155,6 @@ def main(argv: list[str] | None = None) -> int:
             verb = "re-run" if previous else "apply"
             print(f"  {verb} {name} ...", end=" ", flush=True)
             try:
-                # No parameters are bound, so psycopg uses the simple query
-                # protocol, which permits the file's many statements in one call.
                 connection.execute(sql)
             except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the operator
                 print("FAILED")

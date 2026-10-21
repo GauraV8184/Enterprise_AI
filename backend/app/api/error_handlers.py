@@ -21,7 +21,6 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         request_id = request_id_ctx.get()
-        # 5xx from our side is worth a warning; 4xx is expected client behaviour.
         log = logger.warning if exc.status_code < 500 else logger.error
         log(
             "app_error",

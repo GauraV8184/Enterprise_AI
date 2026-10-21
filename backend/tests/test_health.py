@@ -21,7 +21,6 @@ def test_health_ok(client: TestClient) -> None:
 
 
 def test_health_under_api_prefix(client: TestClient) -> None:
-    # The router is mounted both at "/" and under the configured "/api" prefix.
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
@@ -30,7 +29,7 @@ def test_health_under_api_prefix(client: TestClient) -> None:
 def test_request_id_header_is_returned(client: TestClient) -> None:
     response = client.get("/health")
     assert "X-Request-ID" in response.headers
-    assert len(response.headers["X-Request-ID"]) == 32  # uuid4().hex
+    assert len(response.headers["X-Request-ID"]) == 32
 
 
 def test_request_id_is_echoed_back_when_supplied(client: TestClient) -> None:

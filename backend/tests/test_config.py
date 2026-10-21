@@ -66,11 +66,6 @@ def test_get_settings_is_cached() -> None:
     get_settings.cache_clear()
 
 
-# ---------------------------------------------------------------------------
-# File storage
-# ---------------------------------------------------------------------------
-
-
 def test_file_storage_auto_follows_the_document_store() -> None:
     local = Settings(_env_file=None)  # type: ignore[call-arg]
     assert local.use_supabase_storage is False

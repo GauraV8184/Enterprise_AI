@@ -99,7 +99,6 @@ def ingest_document(
         document_id=document_id,
         status=STATUS_PROCESSING,
     ):
-        # The document was deleted between upload and processing.
         raise DocumentProcessingError("The document no longer exists.")
 
     try:
@@ -118,7 +117,6 @@ def ingest_document(
 
         vectors = embeddings.embed_documents([chunk.content for chunk in chunks])
         if len(vectors) != len(chunks):
-            # A mismatch would silently associate text with the wrong vector.
             raise DocumentProcessingError(
                 f"The embedding provider returned {len(vectors)} vectors for {len(chunks)} chunks."
             )
@@ -158,7 +156,6 @@ def ingest_document(
             error=message,
             chunk_count=0,
         )
-        # A half-written document must not leave searchable vectors behind.
         repository.delete_document_chunks(owner_id=owner_id, document_id=document_id)
 
         if isinstance(exc, AppError):

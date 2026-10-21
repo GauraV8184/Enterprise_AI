@@ -31,11 +31,6 @@ class InvalidObjectKeyError(ValueError):
     """A key segment could escape its prefix or corrupt the layout."""
 
 
-#: Everything storage accepts in a key is narrower than the filesystem's rules.
-#: Supabase answers ``400 Invalid key`` for characters outside its allow-list -
-#: discovered by ``scripts/check_storage.py`` with a filename containing ``#``.
-#: Keeping the set to ASCII letters, digits, dot, dash and underscore means a key
-#: never depends on URL encoding to survive the round trip.
 _UNSAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 

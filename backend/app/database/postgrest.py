@@ -30,12 +30,8 @@ from app.security.errors import AccessDeniedError, InvalidTokenError
 
 logger = get_logger(__name__)
 
-#: PostgREST error codes meaning "the schema object this query needs is absent".
-#: PGRST205 = table/view missing from the schema cache, PGRST202 = function missing.
 _SCHEMA_MISSING_CODES = frozenset({"PGRST202", "PGRST205"})
 
-#: pgvector's two ways of saying "wrong width". The first comes from the input
-#: function on insert, the second from the distance operator on search.
 _DIMENSION_PATTERNS = (
     re.compile(r"expected (\d+) dimensions?,?\s+not (\d+)", re.IGNORECASE),
     re.compile(r"different vector dimensions (\d+) and (\d+)", re.IGNORECASE),
@@ -96,8 +92,6 @@ class PostgrestClient:
         self._client = client
         self._timeout = timeout
 
-    # -- verbs -------------------------------------------------------------
-
     def get(
         self,
         path: str,
@@ -135,8 +129,6 @@ class PostgrestClient:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         return self._request("DELETE", path, params=params, headers=headers)
-
-    # -- plumbing ----------------------------------------------------------
 
     def _request(
         self,
@@ -192,14 +184,9 @@ class PostgrestClient:
             ),
         )
 
-        # The token was verified locally before this call, so a 401 here means the
-        # database disagreed - it was revoked, or it expired between the two steps.
-        # Either way the caller needs a new one.
         if response.status_code == 401:
             raise InvalidTokenError()
         if response.status_code == 403:
-            # Row Level Security refused the row, or a grant is missing. Both are
-            # the database doing its job; the application does not retry around it.
             raise AccessDeniedError()
         if pg_code in _SCHEMA_MISSING_CODES:
             raise DocumentStoreNotReadyError()

@@ -27,21 +27,14 @@ from typing import Any
 
 from app.core.config import Settings
 
-# Correlation id for the current request; "-" when outside a request context.
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
-# Attribute names that are part of every LogRecord and must not be treated as
-# user-supplied "extra" fields when building the JSON payload.
 _RESERVED_LOG_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys()) | {
     "message",
     "asctime",
     "taskName",
 }
 
-# A key is sensitive when one of its underscore/dash separated words is in this
-# set. Matching whole words (rather than substrings) avoids redacting legitimate
-# fields such as ``total_tokens`` or ``max_tokens`` while still catching
-# ``access_token`` and ``openai_api_key``.
 _SENSITIVE_WORDS = frozenset(
     {
         "key",
@@ -114,7 +107,6 @@ class JsonFormatter(logging.Formatter):
             "request_id": request_id_ctx.get(),
         }
 
-        # Merge any structured fields passed via ``logger.info(..., extra={...})``.
         for key, value in record.__dict__.items():
             if key not in _RESERVED_LOG_ATTRS and not key.startswith("_"):
                 payload[key] = redact_secrets(value)
@@ -149,8 +141,6 @@ def setup_logging(settings: Settings) -> None:
     root.addHandler(handler)
     root.setLevel(settings.log_level)
 
-    # Align uvicorn's own loggers with our level and stop them double-logging
-    # through their default handlers.
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logger = logging.getLogger(name)
         logger.handlers.clear()

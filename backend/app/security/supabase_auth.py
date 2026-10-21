@@ -62,34 +62,18 @@ logger = get_logger(__name__)
 
 JWKS_PATH = "/.well-known/jwks.json"
 
-#: The audience Supabase puts on access tokens issued for a signed-in user.
 DEFAULT_AUDIENCE = "authenticated"
 
-#: Asymmetric algorithms only. HS* is excluded on purpose - see the module
-#: docstring. ``none`` is not in this set, so an unsigned token is rejected
-#: before any key lookup happens.
 ASYMMETRIC_ALGORITHMS = frozenset(
     {"ES256", "ES384", "ES512", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "EdDSA"}
 )
 
-#: How long a fetched key set is trusted before being refetched.
 DEFAULT_JWKS_TTL_SECONDS = 600.0
 
-#: Timeout for the JWKS request itself. Short: this is on the request path only
-#: when the cache is cold or a key has rotated.
 DEFAULT_JWKS_TIMEOUT_SECONDS = 10.0
 
-#: Minimum gap between refetches triggered by an *unknown* key id.
-#:
-#: A token's ``kid`` is unauthenticated input: the signature has not been checked
-#: yet when it is read. Without a floor, anyone can send a well-formed token with
-#: a random ``kid`` and force a JWKS fetch per request. Rotation still works - the
-#: first token naming a new key triggers a fetch - while a flood is limited to one
-#: fetch per window.
 DEFAULT_UNKNOWN_KID_COOLDOWN_SECONDS = 30.0
 
-#: Tolerance for clock drift between this machine and the auth server. Without
-#: it, a token minted a second in the future is rejected as "not yet valid".
 CLOCK_SKEW_LEEWAY_SECONDS = 30
 
 
@@ -131,18 +115,12 @@ class JwksCache:
         self._ttl = ttl_seconds
         self._timeout = timeout_seconds
         self._unknown_kid_cooldown = unknown_kid_cooldown_seconds
-        # Injectable so tests can supply keys without a network call.
         self._fetch_override = fetch
-        # Guards ``_keys`` and ``_loaded_at``; never held across a fetch.
         self._lock = threading.Lock()
-        # Serialises fetches so a cold cache produces one request, not one per
-        # waiting thread.
         self._refresh_lock = threading.Lock()
         self._keys: dict[str, _SigningKey] = {}
         self._loaded_at = 0.0
         self._last_unknown_kid_refresh = float("-inf")
-
-    # -- fetching ---------------------------------------------------------
 
     def _http_get(self) -> dict[str, Any]:
         response = httpx.get(self._url, timeout=self._timeout)
@@ -191,8 +169,6 @@ class JwksCache:
                 continue
             kid = entry.get("kid")
             if not isinstance(kid, str) or not kid:
-                # A key with no id cannot be selected by a token, so it is of no
-                # use - skip rather than inventing a placeholder id for it.
                 continue
             keys[kid] = _SigningKey(jwk=entry, declared_algorithm=entry.get("alg"))
 
@@ -256,8 +232,6 @@ class JwksCache:
             return next(iter(self._keys.values()))
         return None
 
-    # -- lookup -----------------------------------------------------------
-
     def get(self, kid: str | None) -> _SigningKey:
         with self._lock:
             stale = self._is_stale()
@@ -272,14 +246,10 @@ class JwksCache:
             return key
 
         if kid is None:
-            # Older Supabase tokens omit `kid`. That is only unambiguous when
-            # the project publishes exactly one key.
             raise InvalidTokenError(
                 "The token does not name a key, and the project publishes more than one."
             )
 
-        # Possibly rotated. Refetch before giving up, but at most once per
-        # cooldown: an unknown id is unauthenticated input.
         if self._claim_unknown_kid_refresh():
             self._refresh_once(force=True)
             with self._lock:
@@ -333,8 +303,6 @@ class SupabaseTokenVerifier:
 
         algorithm = header.get("alg")
         if not isinstance(algorithm, str) or algorithm not in ASYMMETRIC_ALGORITHMS:
-            # Covers `none` and every HMAC variant in one check, before any key
-            # is looked up or any signature is attempted.
             logger.warning(
                 "token_algorithm_rejected",
                 extra=safe_extra(algorithm=str(algorithm)),
@@ -358,7 +326,7 @@ class SupabaseTokenVerifier:
             claims = jwt.decode(
                 token,
                 key=signing_key,
-                algorithms=[algorithm],  # the one algorithm we already vetted
+                algorithms=[algorithm],
                 audience=self._audience,
                 issuer=self._issuer,
                 leeway=CLOCK_SKEW_LEEWAY_SECONDS,
@@ -367,8 +335,6 @@ class SupabaseTokenVerifier:
         except jwt.ExpiredSignatureError as exc:
             raise ExpiredTokenError("The access token has expired.") from exc
         except jwt.InvalidTokenError as exc:
-            # Wrong signature, wrong issuer, wrong audience, missing claim - all
-            # "this token is not ours" from the caller's point of view.
             logger.warning(
                 "token_rejected",
                 extra=safe_extra(reason=type(exc).__name__),

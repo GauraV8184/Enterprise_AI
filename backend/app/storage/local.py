@@ -83,16 +83,12 @@ class LocalFileStore:
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
-            # The caller (document deletion) treats a failure to remove the
-            # original as non-fatal, but it still deserves a log line.
             logger.error(
                 "local_file_delete_failed",
                 extra=safe_extra(document_id=document_id, error=type(exc).__name__),
             )
             raise FileStoreError("The stored file could not be deleted.") from exc
 
-        # Best effort: an empty document folder is noise, but a non-empty one
-        # means something else lives there and must stay.
         for directory in (path.parent, path.parent.parent):
             try:
                 directory.rmdir()

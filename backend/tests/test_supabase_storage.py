@@ -61,8 +61,6 @@ def test_upload_posts_under_the_owner_document_key() -> None:
     assert seen["method"] == "POST"
     assert seen["url"] == f"{BASE}/object/documents/{OWNER}/{DOCUMENT}/notes.txt"
     assert seen["body"] == b"hello"
-    # The caller's JWT, not the service-role key: this is what makes the
-    # bucket's policies run at all.
     assert seen["authorization"] == f"Bearer {TOKEN}"
     assert seen["apikey"] == ANON
     assert seen["content_type"] == "text/plain"

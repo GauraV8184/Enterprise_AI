@@ -80,11 +80,6 @@ def ok(request: httpx.Request, payload: object, status: int = 200) -> httpx.Resp
     return httpx.Response(status, json=payload, request=request)
 
 
-# --------------------------------------------------------------------------
-# Transport rules
-# --------------------------------------------------------------------------
-
-
 def test_every_request_carries_the_caller_token_and_the_public_key() -> None:
     """The service-role key must never be reachable from here.
 
@@ -113,11 +108,6 @@ def test_a_repository_cannot_be_built_without_a_caller_token() -> None:
             access_token="",
             client=httpx.Client(transport=httpx.MockTransport(lambda request: ok(request, []))),
         )
-
-
-# --------------------------------------------------------------------------
-# Documents
-# --------------------------------------------------------------------------
 
 
 def test_create_document_sends_a_canonical_uuid_and_returns_hex() -> None:
@@ -228,11 +218,6 @@ def test_update_status_returns_false_when_the_row_does_not_exist() -> None:
     assert repository.update_status(owner_id=USER_ID, document_id=DOC_ID, status="ready") is False
 
 
-# --------------------------------------------------------------------------
-# Chunks
-# --------------------------------------------------------------------------
-
-
 def test_add_chunks_posts_one_array_with_pgvector_text() -> None:
     captured: list[object] = []
 
@@ -268,11 +253,6 @@ def test_count_chunks_reads_the_total_from_content_range() -> None:
         return httpx.Response(200, json=[], headers={"Content-Range": "*/42"}, request=request)
 
     assert make_repository(handler).count_chunks(owner_id=USER_ID) == 42
-
-
-# --------------------------------------------------------------------------
-# Search
-# --------------------------------------------------------------------------
 
 
 def test_search_uses_the_rpc_and_translates_the_result() -> None:
@@ -353,11 +333,6 @@ def test_search_without_a_document_filter_sends_null() -> None:
     assert payloads[0]["filter_document_ids"] is None
 
 
-# --------------------------------------------------------------------------
-# Error translation
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("status", "body", "expected"),
     [
@@ -408,11 +383,6 @@ def test_a_vector_width_mismatch_becomes_a_409_with_both_numbers() -> None:
 
     assert "768" in excinfo.value.message
     assert "3" in excinfo.value.message
-
-
-# --------------------------------------------------------------------------
-# Wiring: the dependency builds the store against the right endpoint
-# --------------------------------------------------------------------------
 
 
 def test_get_repository_points_at_rest_v1_exactly_once() -> None:

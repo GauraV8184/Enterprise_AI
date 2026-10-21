@@ -29,14 +29,10 @@ from app.security.file_validation import SUPPORTED_TYPES
 
 logger = get_logger(__name__)
 
-#: Rows per emitted block for tabular files. Each block re-states the header.
 ROWS_PER_TABLE_BLOCK = 50
 
-#: Hard ceiling on rows read from one sheet/file. A malformed "CSV" that is
-#: really 20 million rows would otherwise be read entirely into memory.
 MAX_TABLE_ROWS = 200_000
 
-#: Text shorter than this from a whole PDF page is treated as "no text layer".
 MIN_PDF_TEXT_PER_PAGE = 8
 
 
@@ -61,9 +57,7 @@ class TextBlock:
     """A contiguous run of text with its origin."""
 
     text: str
-    #: 1-based page number, when the format has pages.
     page: int | None = None
-    #: Nearest preceding heading or sheet name, when the format has one.
     section: str | None = None
 
 
@@ -92,7 +86,6 @@ class _HeadingStack:
         self._entries: list[tuple[int, str]] = []
 
     def push(self, level: int, text: str) -> None:
-        # A heading at the same or shallower level closes everything deeper.
         while self._entries and self._entries[-1][0] >= level:
             self._entries.pop()
         self._entries.append((level, text))
@@ -124,7 +117,7 @@ def _load_pdf(path: Path) -> LoadedDocument:
 
     try:
         document = pymupdf.open(path)
-    except Exception as exc:  # pymupdf raises a variety of low-level errors
+    except Exception as exc:
         raise DocumentParseError(f"Could not open the PDF: {exc}") from exc
 
     try:
@@ -194,7 +187,6 @@ def _load_docx(path: Path) -> LoadedDocument:
         style_name = getattr(item.style, "name", "") or ""
         level = _docx_heading_level(style_name)
         if level is not None:
-            # A new heading closes the previous section.
             flush()
             headings.push(level, text)
             continue
@@ -211,7 +203,6 @@ def _docx_heading_level(style_name: str) -> int | None:
         return 0
     if style_name.startswith("Heading"):
         suffix = style_name.removeprefix("Heading").strip()
-        # Word styles are "Heading 1".."Heading 9"; custom names may not carry a number.
         return int(suffix) if suffix.isdigit() else 1
     return None
 
@@ -311,8 +302,6 @@ def _load_csv(path: Path) -> LoadedDocument:
     try:
         frame = _read_csv_best_effort(path)
     except Exception:
-        # Fall back to delimiter sniffing for quoting/encoding styles pandas' C
-        # parser rejects but its Python parser accepts.
         try:
             frame = pd.read_csv(path, sep=None, engine="python")
         except Exception as exc:
@@ -360,13 +349,11 @@ def _path_variants(path: Path) -> list[str]:
         raw.replace("\\", "/"),
         raw.replace("\\", "\\\\"),
         path.as_posix(),
-        repr(raw)[1:-1],  # repr's own escaping, minus the surrounding quotes
+        repr(raw)[1:-1],
     }
     return sorted((variant for variant in variants if variant), key=len, reverse=True)
 
 
-# Safety net for escaping styles not anticipated above. Requires a drive letter
-# followed by a backslash, so it cannot match a URL ("https://...") or prose.
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"[A-Za-z]:\\{1,2}(?:[^'\"\s\\/]+[\\/]{1,2})*[^'\"\s\\/]*")
 
 
@@ -381,8 +368,6 @@ def _sanitize_message(text: str, *, path: Path, display_name: str) -> str:
     for variant in _path_variants(path):
         text = text.replace(variant, display_name)
 
-    # Belt and braces: if some escaping style still left an absolute path behind,
-    # redact it rather than leak it.
     return _WINDOWS_ABSOLUTE_PATH.sub(display_name, text)
 
 

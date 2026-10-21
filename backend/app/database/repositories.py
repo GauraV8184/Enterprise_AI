@@ -49,7 +49,6 @@ from app.database.errors import EmbeddingDimensionMismatchError
 
 logger = get_logger(__name__)
 
-#: Lifecycle of an uploaded document.
 STATUS_PENDING = "pending"
 STATUS_PROCESSING = "processing"
 STATUS_READY = "ready"
@@ -255,8 +254,6 @@ class DocumentRepository:
     def path(self) -> Path:
         return self._path
 
-    # -- plumbing ---------------------------------------------------------
-
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self._path, timeout=30.0)
@@ -273,8 +270,6 @@ class DocumentRepository:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            # WAL lets reads proceed during a write, which matters because a
-            # background re-index and a user query can overlap.
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(_SCHEMA)
         logger.info("document_store_ready", extra=safe_extra(path=str(self._path)))
@@ -295,8 +290,6 @@ class DocumentRepository:
             created_at=row["created_at"],
             indexed_at=row["indexed_at"],
         )
-
-    # -- documents --------------------------------------------------------
 
     def create_document(
         self,
@@ -422,8 +415,6 @@ class DocumentRepository:
             )
         return True
 
-    # -- chunks -----------------------------------------------------------
-
     def add_chunks(self, chunks: Sequence[ChunkRecord]) -> int:
         """Insert chunks in one transaction.
 
@@ -506,7 +497,6 @@ class DocumentRepository:
             query += f" AND c.document_id IN ({placeholders})"
             params.extend(document_ids)
 
-        # Stable ordering keeps results reproducible for identical scores.
         query += " ORDER BY c.document_id, c.chunk_index"
 
         with self._connect() as connection:

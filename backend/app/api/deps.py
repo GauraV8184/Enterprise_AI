@@ -82,7 +82,6 @@ def get_repository(request: Request, user: CurrentUserDep) -> DocumentStore:
 
     repository = getattr(request.app.state, "repository", None)
     if repository is None:
-        # Only reachable if the lifespan was skipped (e.g. a raw ASGI call).
         raise RuntimeError("The document repository was not initialised at startup.")
     return repository
 
@@ -138,8 +137,6 @@ def get_embeddings(request: Request) -> Embeddings:
     return embeddings
 
 
-# Reusable annotated dependencies. Using ``Annotated`` (the FastAPI-recommended
-# style) keeps ``Depends`` out of function defaults, which satisfies lint rules.
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 ChatModelDep = Annotated[BaseChatModel, Depends(get_chat_model)]
 RepositoryDep = Annotated[DocumentStore, Depends(get_repository)]
