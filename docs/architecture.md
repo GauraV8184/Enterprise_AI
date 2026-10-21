@@ -1,7 +1,7 @@
 # Architecture — Enterprise AI Intelligence Platform
 
 This note explains how the backend is put together and why, focusing on what
-exists after **Phase 1**. It is written to be read by someone learning the
+exists after **Phase 5**. It is written to be read by someone learning the
 stack, so it favors plain language over jargon.
 
 ## 1. High-level shape
@@ -38,6 +38,9 @@ app/
     chunking.py  Splitting that preserves page and section.
     ingest.py    Parse -> chunk -> embed -> store.
     retriever.py Search + grounded answering, written against the store contract.
+  graph/
+    state.py     The state every workflow node reads and updates.
+    workflow.py  The supervisor: classify -> route -> answer.
   database/
     repositories.py        The store contract + the SQLite implementation.
     supabase_repository.py PostgREST-backed store; ranking runs in pgvector.
@@ -54,9 +57,10 @@ app/
   schemas/       Pydantic models describing request/response shapes.
 ```
 
-Feature packages (`agents/`, `graph/`, `tools/`) are created only in the phase
-that implements them. We deliberately avoid shipping empty folders for every
-imagined feature — empty scaffolding looks complete but tests nothing.
+Feature packages are created only in the phase that implements them: `graph/`
+arrived with Phase 5, while `agents/` and `tools/` wait for Phase 6. We
+deliberately avoid shipping empty folders for every imagined feature — empty
+scaffolding looks complete but tests nothing.
 
 ## 3. Request lifecycle
 
@@ -128,7 +132,8 @@ recommendation.
 
 ## 7. What is intentionally NOT here yet
 
-- No agents, tools, or LangGraph workflow — Phases 5–6.
+- No specialist agents or tools — Phase 6. The Phase 5 supervisor exists and
+  routes between the two answer paths that are backed by real code (see §16).
 - No download endpoint for original files, and no signed URLs. Uploads and deletes
   use Storage; reading an original back is only done internally for indexing.
 - No janitor for the rare partial delete: if the object is removed and the row
@@ -179,7 +184,7 @@ request.
 `classify_intent` uses LangChain's `with_structured_output(TaskIntent)`, which
 makes the model emit JSON matching the schema and validates it with Pydantic.
 The success path is `TaskIntent`, never raw text. This is the routing input the
-Phase 5 supervisor will consume, so it is real functionality rather than a demo.
+supervisor (§16) consumes, so it is real functionality rather than a demo.
 
 ### Error translation
 
@@ -610,3 +615,69 @@ prove the bucket is empty.
 There is no download endpoint, so no signed URLs either; the API still never
 serves the original file. There is no janitor for orphaned objects. Indexing is
 still synchronous, now with one extra network round trip.
+
+## 16. The supervisor workflow (Phase 5)
+
+Phase 5 adds `app/graph/`, exposed as `POST /api/workflow/run`. It is a LangGraph
+`StateGraph` with one decision node and two answer nodes:
+
+```
+        START
+          |
+      classify            reads the request, emits the structured TaskIntent
+          |
+   route_for_intent       pure function of the intent
+      /        \
+ answer_directly  answer_from_documents
+ (chat)           (retrieval + citations)
+      \        /
+        END
+```
+
+### The routing rule is a pure function
+
+`route_for_intent(intent)` returns `"documents"` when the classification says
+the request is a document question *or* that internal documents are required;
+everything else goes to `"chat"`. Because the rule is pure, it is tested
+directly without a model, and the conditional edge reads the route the classify
+node already recorded - the decision is made once, stored in the state, and
+never recomputed.
+
+The rule only names capabilities that exist. Business-data, web-research and
+report routes arrive in Phase 6 with their tools; routing a request to a
+capability that cannot answer it would be a lie.
+
+### State
+
+`WorkflowState` is a `TypedDict` with `total=False`, because LangGraph merges
+each node's return value into the running state. Inputs (`question`, `history`,
+`owner_id`, `document_ids`), the decision (`intent`, `route`), and the output
+(`answer`, `grounded`, `sources`, `searched_chunks`, `usage`) each have exactly
+one writer, so no reducer is needed for anything.
+
+### The graph is compiled per request
+
+The Supabase store carries the caller's access token, so the repository is
+caller-scoped and the graph is bound to it per request. Compiling is in-memory
+work only; no I/O happens until a node runs. The alternative - a long-lived
+compiled graph - would have to smuggle a repository through configuration on
+every call, which is exactly the coupling the store contract exists to avoid.
+
+### Honesty rules carry over unchanged
+
+- A classification or provider failure raises the same typed `AppError` the
+  rest of the app uses. There is no fallback that guesses a route.
+- The documents route reuses `answer_question`, including its empty-corpus
+  refusal: when nothing is retrieved the model is not called and `grounded` is
+  `false`.
+- `grounded` is `null` on the chat route rather than a misleading `false`,
+  because grounding does not apply there.
+
+### Testing it
+
+The graph tests drive the fake chat model with a controlled
+`structured_result`, so both routes are exercised deterministically, alongside
+the real SQLite store and real ranking. `scripts/check_workflow.py` proves both
+routes against the configured provider: a greeting must route to chat, and a
+question over a throwaway document must route to documents, come back grounded,
+and cite `[1]`.

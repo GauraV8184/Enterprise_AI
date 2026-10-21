@@ -21,6 +21,7 @@ python-json-logger>=2.0,<4.0
 langchain-core>=1.0,<2.0
 langchain-openai>=1.0,<2.0        # also speaks to Ollama's OpenAI-compatible API
 langchain-text-splitters>=1.0,<2.0
+langgraph>=1.0,<2.0               # supervisor workflow and state (Phase 5)
 numpy>=2.0,<3.0                   # vector maths for similarity search
 
 # --- Document extraction (Phase 3) -------------------------------------------

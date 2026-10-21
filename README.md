@@ -6,10 +6,12 @@ it retrieves internal documents (RAG), queries authorized business data safely
 reports — all coordinated by a LangGraph workflow behind a FastAPI backend and
 a React frontend.
 
-> **Status: Phase 2 of 9 complete, verified against a live model.** The
-> foundation and the LLM integration work end to end (validated with a local
-> Ollama `llama3.1:8b`). Later phases add RAG, Supabase, LangGraph agents,
-> tools, security, and the React UI. See [Roadmap](#roadmap).
+> **Status: Phase 5 of 9 complete, verified against a live model.** Phases 1–5
+> — foundation, LLM integration, RAG over uploaded documents, Supabase
+> persistence with Row Level Security, and the LangGraph supervisor — work end
+> to end (validated with a local Ollama `llama3.1:8b` and the live Supabase
+> project). Later phases add tools and specialist agents, security hardening,
+> the React UI, and deployment. See [Roadmap](#roadmap).
 
 ---
 
@@ -20,15 +22,15 @@ React + TypeScript (Vite)        -> frontend (Phase 8)
         |  HTTPS / JSON
         v
 FastAPI backend  (this repo: backend/)
-   |-- core/     config + logging + error base      <- Phase 1 ✅
-   |-- api/      HTTP routers (health, chat)        <- Phase 1-2 ✅
-   |-- llm/      provider factory, prompts, service <- Phase 2 ✅
-   |-- agents/   LangGraph specialist agents        <- Phase 6
-   |-- graph/    workflow state + orchestration     <- Phase 5
-   |-- rag/      loaders, chunking, retrieval       <- Phase 3
-   |-- tools/    web search, SQL, docs, reports     <- Phase 6
-   |-- security/ guards, SQL validation, audit      <- Phase 7
-   `-- database/ repositories                       <- Phase 4
+   |-- core/     config + logging + error base       <- Phase 1 ✅
+   |-- api/      HTTP routers (chat, docs, workflow) <- Phase 1-5 ✅
+   |-- llm/      provider factory, prompts, service  <- Phase 2 ✅
+   |-- graph/    LangGraph supervisor + state        <- Phase 5 ✅
+   |-- agents/   LangGraph specialist agents         <- Phase 6
+   |-- rag/      loaders, chunking, retrieval        <- Phase 3 ✅
+   |-- tools/    web search, SQL, docs, reports      <- Phase 6
+   |-- security/ guards, SQL validation, audit       <- Phase 7
+   `-- database/ repositories                        <- Phase 4 ✅
         |
         v
 Supabase: PostgreSQL + pgvector + Auth + Storage   <- Phase 4
@@ -187,14 +189,16 @@ talking to a hosted OpenAI-compatible *service* that requires credentials.
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe scripts\check_llm.py   # chat model answers
-.\.venv\Scripts\python.exe scripts\check_rag.py   # upload -> search -> cited answer
+.\.venv\Scripts\python.exe scripts\check_llm.py        # chat model answers
+.\.venv\Scripts\python.exe scripts\check_rag.py        # upload -> search -> cited answer
+.\.venv\Scripts\python.exe scripts\check_workflow.py   # classify -> route -> answer
 ```
 
 `check_llm.py` makes a real chat call and a real structured-output call.
 `check_rag.py` runs the whole document pipeline against a throwaway database, so
-it never touches your `data/` folder. Both print a clear verdict and never print
-a key.
+it never touches your `data/` folder. `check_workflow.py` drives both supervisor
+routes — a greeting and a document question — against a throwaway database. All
+three print a clear verdict and never print a key.
 
 ### Checking that Ollama is running
 
@@ -290,8 +294,8 @@ curl.exe -s -X POST http://127.0.0.1:8000/api/chat `
   -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Explain our Q3 process\"}]}'
 ```
 
-`POST /api/chat/intent` returns a typed classification — the routing input the
-LangGraph supervisor consumes in Phase 5:
+`POST /api/chat/intent` returns a typed classification — the same structure the
+supervisor workflow consumes to route a request:
 
 ```json
 {
@@ -415,11 +419,83 @@ and is not shared between instances.
 
 ---
 
+## The supervisor workflow (Phase 5)
+
+`POST /api/workflow/run` is a single endpoint that decides how a request should
+be answered, routes it, and answers with the same code the dedicated endpoints
+use:
+
+```powershell
+curl.exe -s -X POST http://127.0.0.1:8000/api/workflow/run `
+  -H "Content-Type: application/json" `
+  -d '{\"message\":\"How many days of annual leave do employees get?\"}'
+```
+
+The graph has one decision and two routes, and both are backed by code that was
+already verified in earlier phases:
+
+| Route | Chosen when | Backed by |
+|---|---|---|
+| `documents` | the request is a document question, or the classification says internal documents are required | the retrieval path behind `POST /api/documents/ask` |
+| `chat` | everything else | the completion path behind `POST /api/chat` |
+
+A response (document route, abridged):
+
+```json
+{
+  "answer": "According to [1], a full-time employee accrues twenty days of paid annual leave per calendar year.",
+  "route": "documents",
+  "intent": {
+    "intent": "document_question",
+    "requires_internal_documents": true,
+    "requires_business_data": false,
+    "requires_web_research": false,
+    "complexity": "simple",
+    "summary": "Ask how many days of annual leave a full-time employee accrues."
+  },
+  "grounded": true,
+  "sources": [
+    {
+      "label": 1,
+      "document_id": "5c1b...",
+      "filename": "handbook.txt",
+      "page": null,
+      "section": null,
+      "score": 0.8868,
+      "snippet": "Every full-time employee accrues twenty days of paid annual leave..."
+    }
+  ],
+  "searched_chunks": 1,
+  "provider": "ollama",
+  "model": "llama3.1:8b",
+  "usage": {"input_tokens": 412, "output_tokens": 24, "total_tokens": 436},
+  "request_id": "..."
+}
+```
+
+The decision travels back with the answer, so a caller can always see which
+capability ran and why. `grounded` is documents-route-only: `true` when
+passages were retrieved, `false` when nothing relevant exists — and in that
+case **the model is not called at all**, exactly as with `/api/documents/ask`.
+For the chat route it is `null`, because grounding does not apply.
+
+What the graph deliberately does **not** do yet: there are no specialist
+agents, no web search and no SQL tools — those arrive in Phase 6. Routing to a
+capability that does not exist yet would be a lie, so the only routes today are
+the two backed by real code. A classification or provider failure is reported
+as an error; there is no fallback that answers with a guess.
+
+The graph, the state it carries, and the routing rule live in
+`backend/app/graph/`; `check_workflow.py` (see above) proves both routes against
+your configured provider.
+
+---
+
 ## Run the tests and checks
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 335 passed, 5 skipped
+.\.venv\Scripts\python.exe -m pytest          # 388 passed, 5 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
@@ -430,7 +506,7 @@ The 5 skipped tests are **live** tests that need a running provider. They are op
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
 
-With a provider running the whole suite is green: **340 passed**, including real
+With a provider running the whole suite is green: **393 passed**, including real
 chat calls, real embeddings, and a full upload → retrieve → cite cycle.
 
 The Supabase side has its own live checks. Each creates throwaway users with the
@@ -540,7 +616,7 @@ Responses include `request_id`, which also appears in the logs and in the
 | 2 | LLM integration: chat, structured output, error handling | ✅ done |
 | 3 | RAG: upload, parse, chunk, embed, retrieve | ✅ done |
 | 4 | Supabase: schema, Auth, Storage, RLS, persistence | ✅ done |
-| 5 | LangGraph workflow + state | ⬜ |
+| 5 | LangGraph workflow + state | ✅ done |
 | 6 | Tools & specialist agents + report generation | ⬜ |
 | 7 | Security, audit logging, rate limits, SQL safety | ⬜ |
 | 8 | React + TypeScript frontend | ⬜ |
