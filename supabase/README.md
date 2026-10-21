@@ -1,16 +1,18 @@
-# Supabase setup (Phase 4)
+# Supabase setup (Phases 4–6)
 
 Everything the application needs from Supabase lives in this folder: the database
-schema, the vector index, the Row Level Security policies, and the private storage
-bucket for uploaded files.
+schema, the vector index, the Row Level Security policies, the private storage
+bucket for uploaded files, and the demo dataset behind the SQL analytics tool.
 
-Three files, in order:
+Five files, in order:
 
 | File | Creates |
 | --- | --- |
 | `migrations/0001_documents_and_chunks.sql` | `documents`, `chunks` (+ pgvector, HNSW index, RLS policies, the similarity-search RPC) |
 | `migrations/0002_storage_bucket.sql` | the private `documents` bucket and its access policies |
 | `migrations/0003_tighten_privileges.sql` | revokes privileges that bypass RLS, drops a redundant index |
+| `migrations/0004_search_ready_documents.sql` | replaces `match_document_chunks` so only `ready` documents rank, with a 0.1 similarity floor |
+| `migrations/0005_demo_analytics.sql` | `demo_products`, `demo_sales_orders` (384 seeded rows) and the read-only `run_demo_query()` function |
 
 0003 exists because 0001 was wrong in a way that only the live catalog revealed:
 Supabase grants `ALL` on new `public` tables to `authenticated` by default, and
@@ -20,6 +22,16 @@ to `TRUNCATE`, so it would have let any signed-in user empty every tenant's rows
 PostgREST never exposes `TRUNCATE`, so it was not reachable through the API, but
 the privilege should not have been there at all. `scripts/check_supabase.py` now
 audits this (and the other RLS invariants) on every run.
+
+0005 supports the Phase 6 SQL analytics tool. It creates two **clearly labelled
+demonstration tables** - not business records - and a function that executes one
+caller-supplied `SELECT` against them. The function is `SECURITY INVOKER` (so
+RLS applies inside it), `STABLE` (so Postgres itself refuses writes inside it),
+caps the result at 200 rows, cancels after 5 seconds, and repeats the
+application's keyword rules so the database refuses what the Python guard
+refuses. An `authenticated` caller may read the demo rows; nobody may write them;
+`anon` cannot execute the function at all. Replace the tables and this function
+before pointing the route at real data.
 
 All files are **idempotent** — re-running them is safe, so a failure halfway
 through can be fixed by simply running the file again.
@@ -62,8 +74,8 @@ applied so later runs skip it.
 ### Option B — Supabase SQL editor
 
 No password needs to leave the dashboard. Open **SQL Editor**, paste the whole of
-`0001_documents_and_chunks.sql`, press **Run**, then do the same with
-`0002_storage_bucket.sql` and `0003_tighten_privileges.sql`.
+`0001_documents_and_chunks.sql`, press **Run**, then do the same with the four
+later files in order (`0002` … `0005`).
 
 The trade-off is that there is no record of which files have been applied, so
 `scripts/apply_migrations.py --status` will report nothing. Re-running the files
@@ -85,6 +97,11 @@ auth.users
     │                      page, section, embedding vector(768), created_at
     │
     └──< storage.objects ── key: <owner_id>/<document_id>/<filename>
+
+demo_products        (demo data; read by any authenticated caller)
+    │  id, name, category, unit_price
+    │
+    └──< demo_sales_orders ── order_date, region, product_id, quantity, revenue
 ```
 
 `documents` and `chunks` are a faithful mirror of the SQLite development store
@@ -135,6 +152,22 @@ affect the last segment. It is reduced to a bare basename by
 `storage_filename`, because Storage rejects characters such as `#` outright. The
 display name in `documents.filename` is not changed.
 
+### Policies created by 0005
+
+| Table | Operation | Rule |
+| --- | --- | --- |
+| `demo_products` | SELECT | `true` for `authenticated` |
+| `demo_sales_orders` | SELECT | `true` for `authenticated` |
+
+These two tables are **demonstration data**, so every signed-in caller
+deliberately reads the same rows; there is no owner column to scope by. There is
+no write policy on either table, and `anon` has no grants at all. The
+`run_demo_query()` function that executes generated SQL is `SECURITY INVOKER`
+(it cannot read what RLS would hide) and `STABLE` (Postgres refuses
+data-modifying statements inside a non-volatile function), caps rows at 200,
+cancels after 5 seconds, and is executable by `authenticated` and
+`service_role` only.
+
 ---
 
 ## How the application reaches the database
@@ -159,12 +192,15 @@ downloads embeddings to compare them.
 | `python scripts/check_rls.py` | two real users cannot reach each other's rows through the REST API directly |
 | `python scripts/check_store.py` | the application's own store works end to end and stays tenant-scoped |
 | `python scripts/check_storage.py` | the bucket accepts the caller's own token and refuses a second user's read, write and delete |
+| `python scripts/check_analytics.py` | the demo dataset matches `app/database/demo_data.py` exactly, the row cap and 5s timeout hold, and `run_demo_query()` refuses writes, second statements and blocked keywords even when the application's guard is bypassed |
 
-All four create throwaway users through the admin API. They delete the users, the
+All five create throwaway users through the admin API. They delete the users, the
 rows cascade, and the storage objects are removed explicitly: `storage.objects`
 has no foreign key to `auth.users`, so deleting a user does **not** delete their
 files. `check_rls.py` and `check_storage.py` list the owner's prefix afterwards
-to prove the bucket is empty.
+to prove the bucket is empty. `check_web_search.py` (Tavily) is the sixth check;
+it exits 1 saying "not configured" when no key is set, because a check that
+"passed" without ever searching would be a lie.
 
 ---
 

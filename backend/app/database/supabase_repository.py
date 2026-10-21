@@ -31,6 +31,7 @@ import numpy as np
 from app.core.errors import AppError
 from app.core.logging import get_logger, safe_extra
 from app.database.errors import (
+    AnalyticsQueryFailedError,
     DocumentStoreError,
     EmbeddingDimensionMismatchError,
 )
@@ -43,6 +44,7 @@ from app.database.repositories import (
     DocumentRecord,
     new_id,
 )
+from app.database.sql_guard import MAX_ROWS_HARD_LIMIT, validate_readonly_sql
 
 logger = get_logger(__name__)
 
@@ -393,3 +395,31 @@ class SupabaseDocumentRepository:
         except AppError:
             return None
         return value if isinstance(value, int) else None
+
+    def run_analytics_query(self, *, sql: str, max_rows: int = 100) -> list[dict[str, Any]]:
+        """Run one validated read-only query through ``run_demo_query``.
+
+        The SQL function repeats the Python guard's rules and caps the result
+        itself, so a caller who bypasses the application still cannot run two
+        statements, write anything, or return an unbounded number of rows - and
+        a runaway query is stopped by the function's statement timeout. The
+        response shape is a jsonb array of row objects.
+        """
+        statement = validate_readonly_sql(sql)
+        bounded = max(1, min(int(max_rows), MAX_ROWS_HARD_LIMIT))
+
+        rows = self._client.post(
+            "/rpc/run_demo_query",
+            json={"sql": statement, "max_rows": bounded},
+        ).json()
+
+        if not isinstance(rows, list):
+            raise AnalyticsQueryFailedError(
+                repair_hint="The database returned an unexpected payload for run_demo_query()."
+            )
+
+        logger.info(
+            "analytics_query_completed",
+            extra=safe_extra(rows=len(rows), row_cap=bounded),
+        )
+        return [dict(row) for row in rows]

@@ -39,13 +39,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
 from app.core.logging import get_logger, safe_extra
 from app.core.vectors import cosine_similarity_matrix
-from app.database.errors import EmbeddingDimensionMismatchError
+from app.database.demo_data import DEMO_PRODUCTS, demo_sales_rows
+from app.database.errors import AnalyticsQueryFailedError, EmbeddingDimensionMismatchError
+from app.database.sql_guard import MAX_ROWS_HARD_LIMIT, validate_readonly_sql
 
 logger = get_logger(__name__)
 
@@ -88,6 +90,25 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_owner
     ON chunks (owner_id, document_id);
+
+CREATE TABLE IF NOT EXISTS demo_products (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    category    TEXT NOT NULL,
+    unit_price  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS demo_sales_orders (
+    id          INTEGER PRIMARY KEY,
+    order_date  TEXT NOT NULL,
+    region      TEXT NOT NULL,
+    product_id  INTEGER NOT NULL REFERENCES demo_products (id),
+    quantity    INTEGER NOT NULL,
+    revenue     REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_demo_sales_orders_month
+    ON demo_sales_orders (order_date);
 """
 
 
@@ -235,6 +256,8 @@ class DocumentStore(Protocol):
         min_score: float = 0.1,
     ) -> ChunkSearchResult: ...
 
+    def run_analytics_query(self, *, sql: str, max_rows: int = 100) -> list[dict[str, Any]]: ...
+
 
 class DocumentRepository:
     """Owner-scoped access to documents and vectors.
@@ -272,7 +295,30 @@ class DocumentRepository:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(_SCHEMA)
+            self._seed_demo_dataset(connection)
         logger.info("document_store_ready", extra=safe_extra(path=str(self._path)))
+
+    @staticmethod
+    def _seed_demo_dataset(connection: sqlite3.Connection) -> None:
+        """Insert the demo sales rows once, if the tables are empty."""
+        existing = connection.execute("SELECT COUNT(*) FROM demo_sales_orders").fetchone()[0]
+        if existing:
+            return
+        connection.executemany(
+            "INSERT INTO demo_products (id, name, category, unit_price) VALUES (?, ?, ?, ?)",
+            [
+                (product.id, product.name, product.category, product.unit_price)
+                for product in DEMO_PRODUCTS
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO demo_sales_orders
+                (id, order_date, region, product_id, quantity, revenue)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            demo_sales_rows(),
+        )
 
     @staticmethod
     def _row_to_document(row: sqlite3.Row) -> DocumentRecord:
@@ -590,3 +636,25 @@ class DocumentRepository:
                 break
 
         return ChunkSearchResult(matches=matches, searched_chunks=len(chunks))
+
+    def run_analytics_query(self, *, sql: str, max_rows: int = 100) -> list[dict[str, Any]]:
+        """Run one read-only query against the demo dataset.
+
+        The statement is validated here again, then wrapped in an outer LIMIT so
+        it cannot return more rows than the caller asked for - the same
+        guarantee Postgres provides inside ``run_demo_query``. SQLite has no
+        statement timeout, so on this backend the row cap is the whole
+        resource bound; that is one more reason it stays the development store.
+        """
+        statement = validate_readonly_sql(sql)
+        limit = max(1, min(int(max_rows), MAX_ROWS_HARD_LIMIT))
+        wrapped = f"SELECT * FROM ({statement}) AS demo_query LIMIT {limit}"
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(wrapped).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("analytics_query_failed", extra=safe_extra(error=str(exc)[:200]))
+            raise AnalyticsQueryFailedError(repair_hint=str(exc)) from exc
+
+        return [dict(row) for row in rows]

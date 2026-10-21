@@ -13,8 +13,10 @@ from typing import Literal, TypedDict
 from app.llm.schemas import TaskIntent
 from app.llm.service import TokenUsage
 from app.rag.retriever import RetrievedChunk
+from app.tools.analytics import AnalyticsResult
+from app.tools.web_search import WebResult
 
-WorkflowRoute = Literal["chat", "documents"]
+WorkflowRoute = Literal["chat", "documents", "research", "analytics", "report"]
 
 
 class WorkflowState(TypedDict, total=False):
@@ -32,4 +34,7 @@ class WorkflowState(TypedDict, total=False):
     grounded: bool | None
     sources: list[RetrievedChunk]
     searched_chunks: int
+    web_sources: list[WebResult]
+    web_queries: list[str]
+    analytics: AnalyticsResult | None
     usage: TokenUsage | None

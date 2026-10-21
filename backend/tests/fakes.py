@@ -23,6 +23,8 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
 
+from app.tools.web_search import WebResult
+
 
 class FakeChatModel(BaseChatModel):
     """Deterministic stand-in for a real chat model."""
@@ -35,9 +37,21 @@ class FakeChatModel(BaseChatModel):
     """Raised from generation when set - used to test error translation."""
 
     structured_result: Any = None
+    """Returned by every structured call once ``structured_results`` is empty."""
+
+    structured_results: list[Any] = Field(default_factory=list)
+    """Structured outputs consumed in order.
+
+    A request that makes more than one structured call (classify, then plan a
+    search, then write SQL) gets one entry per call, in the order the app makes
+    them - the same order a real model would be asked.
+    """
+
     structured_error: Any = None
     bound_kwargs: dict[str, Any] = Field(default_factory=dict)
     received: list[list[BaseMessage]] = Field(default_factory=list)
+    structured_received: list[list[BaseMessage]] = Field(default_factory=list)
+    """Messages sent to structured calls, so tests can assert on prompts."""
 
     @property
     def _llm_type(self) -> str:
@@ -83,9 +97,36 @@ class FakeChatModel(BaseChatModel):
         def produce(_input: Any) -> Any:
             if self.structured_error is not None:
                 raise self.structured_error
+            self.structured_received.append(list(_input))
+            if self.structured_results:
+                return self.structured_results.pop(0)
             return self.structured_result
 
         return RunnableLambda(produce)
+
+
+class FakeWebSearch:
+    """In-memory :class:`~app.tools.web_search.WebSearch` implementation.
+
+    Returns the same results for every query (a real provider would vary), which
+    is exactly what makes deduplication testable: the second planned query
+    returns the first query's URLs and they must not appear twice.
+    """
+
+    def __init__(
+        self,
+        results: list[WebResult] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.results = results or []
+        self.error = error
+        self.queries: list[str] = []
+
+    async def search(self, query: str, *, max_results: int) -> list[WebResult]:
+        self.queries.append(query)
+        if self.error is not None:
+            raise self.error
+        return self.results[:max_results]
 
 
 class HashingEmbeddings(Embeddings):

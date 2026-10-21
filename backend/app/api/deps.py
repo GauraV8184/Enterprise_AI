@@ -30,6 +30,7 @@ from app.security.identity import (
 )
 from app.storage.base import DocumentFileStore
 from app.storage.supabase import SupabaseStorage
+from app.tools.web_search import WebSearch
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -137,8 +138,19 @@ def get_embeddings(request: Request) -> Embeddings:
     return embeddings
 
 
+def get_web_search(request: Request) -> WebSearch | None:
+    """Return the app's web search provider, or ``None`` when none is configured.
+
+    ``None`` is not an error here. Chat, documents and analytics requests must
+    keep working without a search key; the research route and web-sourced
+    reports turn the absence into a typed 503 when they actually need to search.
+    """
+    return getattr(request.app.state, "web_search", None)
+
+
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 ChatModelDep = Annotated[BaseChatModel, Depends(get_chat_model)]
 RepositoryDep = Annotated[DocumentStore, Depends(get_repository)]
 FileStoreDep = Annotated[DocumentFileStore, Depends(get_file_store)]
 EmbeddingsDep = Annotated[Embeddings, Depends(get_embeddings)]
+WebSearchDep = Annotated[WebSearch | None, Depends(get_web_search)]

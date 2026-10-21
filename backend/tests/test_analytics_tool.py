@@ -1,0 +1,153 @@
+"""The SQL analytics tool against the real SQLite store.
+
+The store, the demo seed, the guard and the executor are all real; nothing here
+is mocked. That is the point: the values below are computed from the same
+``app.database.demo_data`` generator that seeds the database, so a seed that
+drifts from the definition fails the test instead of quietly changing answers.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from app.database.demo_data import DEMO_ORDER_COUNT, DEMO_PRODUCTS, demo_sales_rows
+from app.database.errors import AnalyticsQueryFailedError, AnalyticsQueryRejectedError
+from app.database.repositories import DocumentRepository
+from app.database.sql_guard import MAX_ROWS_HARD_LIMIT
+from app.tools.analytics import (
+    DEMO_SCHEMA_DESCRIPTION,
+    render_rows,
+    run_analytics_query,
+)
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> DocumentRepository:
+    return DocumentRepository(tmp_path / "analytics" / "app.db")
+
+
+def test_demo_dataset_is_seeded_deterministically(store: DocumentRepository) -> None:
+    products = run_analytics_query(
+        store, sql="select count(*) as n from demo_products", max_rows=10
+    )
+    orders = run_analytics_query(
+        store, sql="select count(*) as n from demo_sales_orders", max_rows=10
+    )
+
+    assert products.rows == [{"n": len(DEMO_PRODUCTS)}]
+    assert orders.rows == [{"n": DEMO_ORDER_COUNT}]
+
+    expected_revenue = round(sum(row[5] for row in demo_sales_rows()), 2)
+    totals = run_analytics_query(
+        store, sql="select round(sum(revenue), 2) as total from demo_sales_orders", max_rows=10
+    )
+    assert totals.rows == [{"total": expected_revenue}]
+
+
+def test_seeding_runs_once_even_when_the_store_is_reopened(tmp_path: Path) -> None:
+    path = tmp_path / "analytics" / "app.db"
+    DocumentRepository(path)
+    reopened = DocumentRepository(path)
+
+    orders = run_analytics_query(
+        reopened, sql="select count(*) as n from demo_sales_orders", max_rows=10
+    )
+    assert orders.rows == [{"n": DEMO_ORDER_COUNT}]
+
+
+def test_aggregates_answer_business_questions(store: DocumentRepository) -> None:
+    by_region = run_analytics_query(
+        store,
+        sql=(
+            "select region, round(sum(revenue), 2) as revenue "
+            "from demo_sales_orders group by region order by revenue desc"
+        ),
+        max_rows=10,
+    )
+
+    assert len(by_region.rows) == 4
+    assert all(set(row) == {"region", "revenue"} for row in by_region.rows)
+    revenues = [row["revenue"] for row in by_region.rows]
+    assert revenues == sorted(revenues, reverse=True)
+    assert sum(revenues) == pytest.approx(round(sum(row[5] for row in demo_sales_rows()), 2))
+
+    by_year = run_analytics_query(
+        store,
+        sql=(
+            "select substr(order_date, 1, 4) as year, count(*) as orders "
+            "from demo_sales_orders group by year order by year"
+        ),
+        max_rows=10,
+    )
+    assert [row["year"] for row in by_year.rows] == ["2024", "2025"]
+    assert [row["orders"] for row in by_year.rows] == [DEMO_ORDER_COUNT // 2] * 2
+
+
+def test_row_cap_is_enforced_by_the_outer_limit(store: DocumentRepository) -> None:
+    capped = run_analytics_query(store, sql="select * from demo_sales_orders", max_rows=10)
+
+    assert capped.row_count == 10
+    assert capped.truncated is True
+
+    oversized = run_analytics_query(
+        store, sql="select * from demo_sales_orders", max_rows=MAX_ROWS_HARD_LIMIT + 100
+    )
+    assert oversized.row_count == MAX_ROWS_HARD_LIMIT
+    assert oversized.truncated is True
+
+    complete = run_analytics_query(store, sql="select * from demo_sales_orders", max_rows=400)
+    assert complete.row_count == MAX_ROWS_HARD_LIMIT
+
+
+def test_inner_limit_cannot_defeat_the_cap(store: DocumentRepository) -> None:
+    capped = run_analytics_query(
+        store, sql="select * from demo_sales_orders limit 1000", max_rows=5
+    )
+    assert capped.row_count == 5
+
+
+def test_guard_rejection_never_reaches_the_database(store: DocumentRepository) -> None:
+    with pytest.raises(AnalyticsQueryRejectedError):
+        run_analytics_query(store, sql="drop table demo_sales_orders", max_rows=10)
+
+
+def test_a_broken_query_fails_with_a_repair_hint(store: DocumentRepository) -> None:
+    with pytest.raises(AnalyticsQueryFailedError) as caught:
+        run_analytics_query(store, sql="select revenu from demo_sales_orders", max_rows=10)
+
+    assert "revenu" in caught.value.repair_hint
+    assert caught.value.message == caught.value.public_message
+
+
+def test_schema_description_describes_the_seeded_tables() -> None:
+    assert "demo_products" in DEMO_SCHEMA_DESCRIPTION
+    assert "demo_sales_orders" in DEMO_SCHEMA_DESCRIPTION
+    assert "substr(order_date, 1, 7)" in DEMO_SCHEMA_DESCRIPTION
+    assert str(DEMO_ORDER_COUNT) in DEMO_SCHEMA_DESCRIPTION
+    for product in DEMO_PRODUCTS:
+        assert product.category in DEMO_SCHEMA_DESCRIPTION
+
+
+def test_render_rows_stays_within_the_character_budget() -> None:
+    rows = [{"region": "North", "revenue": index * 1000} for index in range(200)]
+
+    text, included = render_rows(rows, max_chars=500)
+
+    assert 0 < included < len(rows)
+    assert json.loads(text) == rows[:included]
+
+
+def test_render_rows_keeps_one_oversized_row_rather_than_nothing() -> None:
+    rows = [{"blob": "x" * 5000}]
+
+    text, included = render_rows(rows, max_chars=100)
+
+    assert included == 1
+    assert json.loads(text) == rows
+
+
+def test_render_rows_handles_an_empty_result() -> None:
+    assert render_rows([]) == ("[]", 0)

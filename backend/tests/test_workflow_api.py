@@ -7,19 +7,22 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
-from app.llm.schemas import TaskIntent
+from app.llm.schemas import AnalyticsQuery, SearchPlan, TaskIntent
 from app.main import create_app
+from app.tools.web_search import WebResult
 from tests.conftest import upload
-from tests.fakes import FakeChatModel
+from tests.fakes import FakeChatModel, FakeWebSearch
 from tests.sample_files import write_text_file
 
 
-def make_intent(intent: str, *, documents: bool) -> TaskIntent:
+def make_intent(
+    intent: str, *, documents: bool = False, business: bool = False, web: bool = False
+) -> TaskIntent:
     return TaskIntent(
         intent=intent,  # type: ignore[arg-type]
         requires_internal_documents=documents,
-        requires_business_data=False,
-        requires_web_research=False,
+        requires_business_data=business,
+        requires_web_research=web,
         complexity="simple",
         summary="The user asked something.",
     )
@@ -110,6 +113,105 @@ def test_workflow_reports_not_configured_without_a_model(client: TestClient) -> 
 
     assert response.status_code == 503
     assert response.json()["code"] == "llm_not_configured"
+
+
+def test_workflow_routes_data_questions_and_returns_the_rows(
+    rag_client: TestClient, fake_model: FakeChatModel
+) -> None:
+    fake_model.structured_results = [
+        make_intent("data_analysis", business=True),
+        AnalyticsQuery(
+            sql="select count(*) as n from demo_products", reasoning="Counts products."
+        ),
+    ]
+    fake_model.replies = ["The demo catalogue holds 4 products."]
+
+    response = rag_client.post(
+        "/api/workflow/run", json={"message": "How many products are in the catalogue?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "analytics"
+    assert body["grounded"] is True
+    assert body["analytics"]["rows"] == [{"n": 4}]
+    assert body["sources"] == []
+    assert body["web_sources"] == []
+
+
+def test_workflow_routes_research_questions_and_returns_web_sources(
+    web_client: TestClient, fake_model: FakeChatModel, fake_web_search: FakeWebSearch
+) -> None:
+    fake_web_search.results = [
+        WebResult(
+            title="Leave law update",
+            url="https://example.com/leave-law",
+            content="Statutory leave remains 28 days.",
+            score=0.7,
+        )
+    ]
+    fake_model.structured_results = [
+        make_intent("research", web=True),
+        SearchPlan(queries=["statutory leave uk"]),
+    ]
+    fake_model.replies = ["Statutory leave remains 28 days [W1]."]
+
+    response = web_client.post(
+        "/api/workflow/run", json={"message": "What is the current statutory leave?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "research"
+    assert body["grounded"] is True
+    assert [source["label"] for source in body["web_sources"]] == ["W1"]
+    assert body["sources"] == []
+    assert body["analytics"] is None
+
+
+def test_workflow_research_without_a_key_is_a_typed_503(
+    rag_client: TestClient, fake_model: FakeChatModel
+) -> None:
+    fake_model.structured_result = make_intent("research", web=True)
+
+    response = rag_client.post(
+        "/api/workflow/run", json={"message": "What is the latest leave law news?"}
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "web_search_not_configured"
+
+
+def test_workflow_routes_reports_and_returns_evidence_blocks(
+    web_client: TestClient, fake_model: FakeChatModel, fake_web_search: FakeWebSearch
+) -> None:
+    fake_web_search.results = [
+        WebResult(
+            title="Leave law update",
+            url="https://example.com/leave-law",
+            content="Statutory leave remains 28 days.",
+            score=0.7,
+        )
+    ]
+    fake_model.structured_results = [
+        make_intent("report", business=True, web=True),
+        AnalyticsQuery(sql="select count(*) as n from demo_products", reasoning="Counts."),
+        SearchPlan(queries=["statutory leave uk"]),
+    ]
+    fake_model.replies = ["# Report\n\nFour products and 28 days statutory leave [W1]."]
+
+    response = web_client.post(
+        "/api/workflow/run", json={"message": "Report on leave and the product catalogue."}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "report"
+    assert body["grounded"] is True
+    assert body["answer"].startswith("# Report")
+    assert body["analytics"]["rows"] == [{"n": 4}]
+    assert [source["label"] for source in body["web_sources"]] == ["W1"]
+    assert body["sources"] == []
 
 
 def test_workflow_requires_authentication_when_supabase_auth_is_enabled() -> None:

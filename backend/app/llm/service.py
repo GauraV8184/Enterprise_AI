@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
@@ -36,6 +36,7 @@ from openai import (
     PermissionDeniedError,
     RateLimitError,
 )
+from pydantic import BaseModel
 
 from app.core.errors import AppError
 from app.core.logging import get_logger, safe_extra
@@ -55,6 +56,8 @@ from app.llm.schemas import TaskIntent
 logger = get_logger(__name__)
 
 _ROLE_TO_MESSAGE = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage}
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 @dataclass(frozen=True)
@@ -326,3 +329,55 @@ async def classify_intent(
         except Exception as exc:  # noqa: BLE001
             raise LlmStructuredOutputError() from exc
     return result
+
+
+def _validate_structured(value: Any, schema: type[ModelT]) -> ModelT:
+    """Pydantic-validate a structured result, mapping failures to a 502."""
+    if isinstance(value, schema):
+        return value
+    try:
+        return schema.model_validate(value)
+    except Exception as exc:  # noqa: BLE001 - deliberately translated below
+        raise LlmStructuredOutputError() from exc
+
+
+async def structured_completion(
+    model: BaseChatModel,
+    schema: type[ModelT],
+    *,
+    prompt: str,
+    system_prompt: str,
+) -> ModelT:
+    """Run one structured-output call and return the validated value.
+
+    The same execution path as :func:`classify_intent` - ``with_structured_output``
+    plus Pydantic validation - generalised so the Phase 6 agents (web-search
+    planning, SQL generation) reuse it instead of re-implementing the error
+    translation.
+
+    Token usage of structured calls is not reported: providers vary in whether
+    it survives schema-constrained output, and the API reports the usage of the
+    free-text answering call, which is the number that matters for cost.
+
+    Raises:
+        AppError: provider failures, or a schema mismatch
+            (:class:`LlmStructuredOutputError`).
+    """
+    messages = build_messages([{"role": "user", "content": prompt}], system_prompt)
+
+    try:
+        structured = model.with_structured_output(schema)
+        result = await structured.ainvoke(messages)
+    except Exception as exc:  # noqa: BLE001 - deliberately translated below
+        mapped = map_exception(exc)
+        logger.warning(
+            "llm_structured_call_failed",
+            extra=safe_extra(
+                error_type=type(exc).__name__,
+                mapped_error=mapped.code,
+                schema=schema.__name__,
+            ),
+        )
+        raise mapped from exc
+
+    return _validate_structured(result, schema)

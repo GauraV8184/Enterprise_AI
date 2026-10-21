@@ -22,6 +22,8 @@ import httpx
 
 from app.core.logging import get_logger, safe_extra
 from app.database.errors import (
+    AnalyticsQueryFailedError,
+    AnalyticsQueryRejectedError,
     DocumentStoreError,
     DocumentStoreNotReadyError,
     DocumentStoreUnavailableError,
@@ -31,6 +33,10 @@ from app.security.errors import AccessDeniedError, InvalidTokenError
 logger = get_logger(__name__)
 
 _SCHEMA_MISSING_CODES = frozenset({"PGRST202", "PGRST205"})
+
+_ANALYTICS_RPC_PATH = "/rpc/run_demo_query"
+
+_STATEMENT_TIMEOUT_SQLSTATE = "57014"
 
 _DIMENSION_PATTERNS = (
     re.compile(r"expected (\d+) dimensions?,?\s+not (\d+)", re.IGNORECASE),
@@ -190,6 +196,11 @@ class PostgrestClient:
             raise AccessDeniedError()
         if pg_code in _SCHEMA_MISSING_CODES:
             raise DocumentStoreNotReadyError()
+        if path.startswith(_ANALYTICS_RPC_PATH):
+            if pg_code == "P0001":
+                raise AnalyticsQueryRejectedError(message)
+            if response.status_code == 400 or pg_code == _STATEMENT_TIMEOUT_SQLSTATE:
+                raise AnalyticsQueryFailedError(repair_hint=message)
         if any(pattern.search(message) for pattern in _DIMENSION_PATTERNS):
             raise VectorDimensionError(message)
         if response.status_code >= 500:

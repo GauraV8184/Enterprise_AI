@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     retrieval_min_score: float = Field(default=0.1, ge=-1.0, le=1.0)
     max_context_chars: int = Field(default=12000, ge=100, le=100_000)
 
+    tavily_api_key: SecretStr | None = None
+    web_search_max_results: int = Field(default=5, ge=1, le=10)
+    web_search_timeout_seconds: float = Field(default=30.0, gt=0.0, le=120.0)
+
+    analytics_max_rows: int = Field(default=100, ge=1, le=200)
+
     dev_user_id: str = Field(default="dev-user", min_length=1)
 
     supabase_url: str | None = None
@@ -121,7 +127,13 @@ class Settings(BaseSettings):
             return [item.strip() for item in text.split(",") if item.strip()]
         return value
 
-    @field_validator("openai_api_key", "openai_base_url", "embedding_base_url", mode="before")
+    @field_validator(
+        "openai_api_key",
+        "openai_base_url",
+        "embedding_base_url",
+        "tavily_api_key",
+        mode="before",
+    )
     @classmethod
     def _blank_string_to_none(cls, value: object) -> object:
         """Treat ``KEY=`` (empty) in .env as "not set" rather than ""."""
@@ -262,6 +274,16 @@ class Settings(BaseSettings):
         if self.embedding_provider == "openai":
             return self.openai_api_key is not None
         return False
+
+    @property
+    def web_search_configured(self) -> bool:
+        """True when a Tavily API key is present.
+
+        Web search is optional: without a key the platform still answers from
+        documents, data and chat. The research route reports a typed 503 instead
+        of silently returning fabricated results.
+        """
+        return self.tavily_api_key is not None
 
     @property
     def uploads_dir(self) -> Path:

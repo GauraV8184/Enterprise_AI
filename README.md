@@ -6,12 +6,15 @@ it retrieves internal documents (RAG), queries authorized business data safely
 reports — all coordinated by a LangGraph workflow behind a FastAPI backend and
 a React frontend.
 
-> **Status: Phase 5 of 9 complete, verified against a live model.** Phases 1–5
+> **Status: Phase 6 of 9 complete, verified against live providers.** Phases 1–6
 > — foundation, LLM integration, RAG over uploaded documents, Supabase
-> persistence with Row Level Security, and the LangGraph supervisor — work end
+> persistence with Row Level Security, the LangGraph supervisor, and the
+> specialist agents (SQL analytics, web research, Markdown reports) — work end
 > to end (validated with a local Ollama `llama3.1:8b` and the live Supabase
-> project). Later phases add tools and specialist agents, security hardening,
-> the React UI, and deployment. See [Roadmap](#roadmap).
+> project). Web research needs `TAVILY_API_KEY`; without it the research route
+> answers a typed 503, and `check_web_search.py` exits 1 saying "not
+> configured" rather than pretending to pass. Later phases add security
+> hardening, the React UI, and deployment. See [Roadmap](#roadmap).
 
 ---
 
@@ -23,12 +26,12 @@ React + TypeScript (Vite)        -> frontend (Phase 8)
         v
 FastAPI backend  (this repo: backend/)
    |-- core/     config + logging + error base       <- Phase 1 ✅
-   |-- api/      HTTP routers (chat, docs, workflow) <- Phase 1-5 ✅
+   |-- api/      chat, documents, workflow, reports  <- Phase 1-6 ✅
    |-- llm/      provider factory, prompts, service  <- Phase 2 ✅
    |-- graph/    LangGraph supervisor + state        <- Phase 5 ✅
-   |-- agents/   LangGraph specialist agents         <- Phase 6
+   |-- agents/   analyst, research, report writers   <- Phase 6 ✅
    |-- rag/      loaders, chunking, retrieval        <- Phase 3 ✅
-   |-- tools/    web search, SQL, docs, reports      <- Phase 6
+   |-- tools/    Tavily search + SQL analytics       <- Phase 6 ✅
    |-- security/ guards, SQL validation, audit       <- Phase 7
    `-- database/ repositories                        <- Phase 4 ✅
         |
@@ -64,10 +67,19 @@ Enterprize_AI/
 │   │   │   ├── chunking.py         # splitting that preserves page + section
 │   │   │   ├── ingest.py           # parse -> chunk -> embed -> store pipeline
 │   │   │   └── retriever.py        # similarity search + grounded answering
+│   │   ├── agents/
+│   │   │   ├── analyst.py          # SQL generation, repair loop, summary
+│   │   │   ├── research.py         # search planning, dedup, cited answers
+│   │   │   └── report.py           # evidence gathering + Markdown reports
+│   │   ├── tools/
+│   │   │   ├── analytics.py        # demo schema description + SQL execution
+│   │   │   └── web_search.py       # Tavily client (plain httpx, no extra SDK)
 │   │   ├── database/
 │   │   │   ├── repositories.py        # store contract + SQLite implementation
 │   │   │   ├── supabase_repository.py # PostgREST store; search via pgvector
-│   │   │   └── postgrest.py           # per-caller transport + error mapping
+│   │   │   ├── postgrest.py           # per-caller transport + error mapping
+│   │   │   ├── sql_guard.py           # read-only SQL pre-flight rules
+│   │   │   └── demo_data.py           # the demo sales dataset (both seeds)
 │   │   ├── storage/
 │   │   │   ├── base.py                # file-store contract + key layout
 │   │   │   ├── local.py               # filesystem backend (dev + tests)
@@ -82,12 +94,17 @@ Enterprize_AI/
 │   │   │   ├── health.py           # / and /health
 │   │   │   ├── chat.py             # /chat, /chat/intent, /chat/status
 │   │   │   ├── documents.py        # upload, list, delete, search, ask
+│   │   │   ├── workflow.py         # /workflow/run
+│   │   │   ├── reports.py          # /reports
 │   │   │   ├── error_handlers.py   # AppError -> JSON
 │   │   │   └── router.py
 │   │   └── schemas/
 │   │       ├── health.py
 │   │       ├── chat.py
-│   │       └── documents.py
+│   │       ├── documents.py
+│   │       ├── evidence.py         # web + analytics evidence blocks
+│   │       ├── workflow.py
+│   │       └── reports.py
 │   ├── scripts/
 │   │   ├── check_llm.py            # live diagnostic for the LLM setup
 │   │   ├── check_rag.py            # live diagnostic for the document pipeline
@@ -95,12 +112,16 @@ Enterprize_AI/
 │   │   ├── check_rls.py            # tenant isolation through the REST API
 │   │   ├── check_store.py          # the application's store, live
 │   │   ├── check_storage.py        # bucket policies, live
+│   │   ├── check_workflow.py       # every supervisor route, live
+│   │   ├── check_analytics.py      # demo dataset + SQL function, live
+│   │   ├── check_web_search.py     # live Tavily search (exits 1 without a key)
 │   │   └── apply_migrations.py     # apply supabase/migrations over psycopg
-│   ├── tests/                      # 335 offline tests + 5 opt-in live tests
+│   ├── tests/                      # 470 offline tests + 5 opt-in live tests
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   └── pyproject.toml
 ├── docs/architecture.md
+├── supabase/migrations/            # 0001-0005: schema, RLS, search, demo data
 ├── data/                           # git-ignored: uploads + SQLite store
 ├── .env.example
 └── README.md
@@ -196,9 +217,10 @@ cd backend
 
 `check_llm.py` makes a real chat call and a real structured-output call.
 `check_rag.py` runs the whole document pipeline against a throwaway database, so
-it never touches your `data/` folder. `check_workflow.py` drives both supervisor
-routes — a greeting and a document question — against a throwaway database. All
-three print a clear verdict and never print a key.
+it never touches your `data/` folder. `check_workflow.py` drives every
+supervisor route your configuration supports — chat, documents, analytics and
+report, plus research when `TAVILY_API_KEY` is set — against a throwaway
+database. Each script prints a clear verdict and never prints a key.
 
 ### Checking that Ollama is running
 
@@ -278,6 +300,8 @@ From the `backend` directory:
 | `DELETE /api/documents/{id}` | delete a document, its vectors and the stored file |
 | `POST /api/documents/search` | semantic search over your own documents |
 | `POST /api/documents/ask` | answer a question from your documents, with citations |
+| `POST /api/workflow/run` | classify a request and answer it with the right capability |
+| `POST /api/reports` | generate an evidence-backed Markdown report |
 | `GET /docs` | interactive Swagger UI |
 
 All `/api/*` endpoints require a caller identity. In development the stub supplies
@@ -419,7 +443,7 @@ and is not shared between instances.
 
 ---
 
-## The supervisor workflow (Phase 5)
+## The supervisor workflow (Phase 5–6)
 
 `POST /api/workflow/run` is a single endpoint that decides how a request should
 be answered, routes it, and answers with the same code the dedicated endpoints
@@ -431,13 +455,22 @@ curl.exe -s -X POST http://127.0.0.1:8000/api/workflow/run `
   -d '{\"message\":\"How many days of annual leave do employees get?\"}'
 ```
 
-The graph has one decision and two routes, and both are backed by code that was
-already verified in earlier phases:
+The graph has one decision and five routes, each backed by code that is verified
+on its own:
 
 | Route | Chosen when | Backed by |
 |---|---|---|
+| `report` | the classification names a report — the only route asked to combine sources | the report agent behind `POST /api/reports` |
 | `documents` | the request is a document question, or the classification says internal documents are required | the retrieval path behind `POST /api/documents/ask` |
+| `research` | the request asks for external information, or web research is required | live Tavily search, cited as `[W1]`… (503 without `TAVILY_API_KEY`) |
+| `analytics` | the request is a data question, or business data is required | one generated, validated SQL query over the demo dataset |
 | `chat` | everything else | the completion path behind `POST /api/chat` |
+
+The priority is deliberate. A report wins outright because it is the only route
+that gathers from more than one source; a request that names the internal corpus
+is answered from it rather than from the web; and a route whose tool is not
+configured fails with a typed `503` instead of quietly answering from a weaker
+source.
 
 A response (document route, abridged):
 
@@ -466,6 +499,8 @@ A response (document route, abridged):
     }
   ],
   "searched_chunks": 1,
+  "web_sources": [],
+  "analytics": null,
   "provider": "ollama",
   "model": "llama3.1:8b",
   "usage": {"input_tokens": 412, "output_tokens": 24, "total_tokens": 436},
@@ -474,20 +509,110 @@ A response (document route, abridged):
 ```
 
 The decision travels back with the answer, so a caller can always see which
-capability ran and why. `grounded` is documents-route-only: `true` when
-passages were retrieved, `false` when nothing relevant exists — and in that
-case **the model is not called at all**, exactly as with `/api/documents/ask`.
-For the chat route it is `null`, because grounding does not apply.
+capability ran and why. Evidence comes back in three shapes: `sources` are
+document passages labelled `[1]`, `[2]` as the model was told to cite them;
+`web_sources` are web results labelled `W1`, `W2`; `analytics` carries the SQL
+that ran and the rows it returned. The prefixes are load-bearing — in one
+response that cites both, `[1]` must never be confusable with `W1`.
 
-What the graph deliberately does **not** do yet: there are no specialist
-agents, no web search and no SQL tools — those arrive in Phase 6. Routing to a
-capability that does not exist yet would be a lie, so the only routes today are
-the two backed by real code. A classification or provider failure is reported
-as an error; there is no fallback that answers with a guess.
+`grounded` applies to the four evidence routes: `true` when the source returned
+evidence, `false` when it returned nothing — and in that case **the model is not
+called at all**, exactly as with `/api/documents/ask`. A report whose requested
+sources all come back empty returns a short Markdown body that says so. For the
+chat route `grounded` is `null`, because grounding does not apply.
 
-The graph, the state it carries, and the routing rule live in
-`backend/app/graph/`; `check_workflow.py` (see above) proves both routes against
-your configured provider.
+A classification, retrieval, search, SQL, or provider failure is reported as an
+error; there is no fallback that answers with a guess.
+
+The graph, the state it carries, and the routing rules live in
+`backend/app/graph/`; `check_workflow.py` (see above) proves every configured
+route against your configured provider.
+
+---
+
+## Tools and specialist agents (Phase 6)
+
+### SQL analytics over a demo dataset
+
+Data questions are answered by generating one SQL query, running it, and
+summarising the returned rows. The dataset is **clearly-labelled demonstration
+data**: `demo_products` (4 products) and `demo_sales_orders` (384 orders across
+4 regions and 24 months from 2024-01), seeded identically by migration
+`0005_demo_analytics.sql` in Postgres and by `app/database/demo_data.py` in the
+SQLite development store. `check_analytics.py` compares the two seeds against
+each other on the live project.
+
+Executing generated SQL is a security-shaped problem, so it is bounded in three
+independent layers, and each one fails closed:
+
+1. **A Python pre-flight guard** (`app/database/sql_guard.py`): exactly one
+   statement, `SELECT`/`WITH` only, a keyword blocklist, and a length limit. Its
+   refusals are safe to show, and the analyst feeds one back to the model as a
+   single repair attempt.
+2. **The database function** (`run_demo_query`): `SECURITY INVOKER` and
+   `STABLE` — Postgres itself refuses data-modifying statements inside a
+   non-volatile function — with its own copy of the keyword rules, an outer
+   `LIMIT` capped at 200 rows (`ANALYTICS_MAX_ROWS` defaults to 100), and
+   `statement_timeout = 5s` so a runaway query is cancelled.
+3. **Row Level Security**: every authenticated caller may read the demo tables;
+   `anon` has no grants at all, and the function cannot widen anyone's access
+   because it runs with the caller's own privileges.
+
+The analyst agent gets at most two attempts: generate, and — if the query is
+rejected or fails — one repair with the database's own complaint as feedback.
+Still failing means a typed error, never a made-up answer.
+
+### Web research (Tavily)
+
+With `TAVILY_API_KEY` set, research questions are answered from live search
+results, cited as `[W1]`, `[W2]`. The agent plans its queries with a structured
+call, deduplicates results across queries, and — when a search returns nothing —
+says so without calling the model. Without a key the route answers
+`503 web_search_not_configured`; it never substitutes model knowledge for a
+search that did not happen. Verify with `scripts/check_web_search.py`, which
+exits 1 with "not configured" in that state.
+
+### Markdown reports
+
+`POST /api/reports` is the one endpoint that combines capabilities:
+
+```powershell
+curl.exe -s -X POST http://127.0.0.1:8000/api/reports `
+  -H "Content-Type: application/json" `
+  -d '{\"topic\":\"Annual leave policy and demo sales by region\",\"sources\":[\"documents\",\"analytics\"]}'
+```
+
+The response carries the Markdown body **and everything it was written from**,
+so a reader can check the report instead of trusting it (abridged):
+
+```json
+{
+  "report": "# Annual leave policy and demo sales by region\n\nEmployees accrue twenty days [1]...",
+  "topic": "Annual leave policy and demo sales by region",
+  "sources_requested": ["documents", "analytics"],
+  "grounded": true,
+  "sources": [{"label": 1, "filename": "handbook.txt", "page": null, "score": 0.87, "snippet": "Every full-time employee..."}],
+  "web_sources": [],
+  "analytics": {
+    "sql": "select region, round(sum(revenue), 2) as revenue from demo_sales_orders group by region",
+    "row_count": 4,
+    "truncated": false,
+    "rows": [{"region": "East", "revenue": 508924.0}]
+  },
+  "provider": "ollama",
+  "model": "llama3.1:8b",
+  "usage": {"input_tokens": 612, "output_tokens": 291, "total_tokens": 903},
+  "request_id": "..."
+}
+```
+
+Defaults and honesty rules: `sources` defaults to `["documents"]` and is never
+widened silently; duplicates are removed; requesting `web` without a key is a
+`503` rather than a report with a quietly missing source. A requested source
+that came back empty is named in the prompt as a gap, so the report states what
+it could not cover instead of padding. If *no* requested source returns
+evidence, `grounded` is `false` and the response explains itself with no model
+call at all.
 
 ---
 
@@ -495,7 +620,7 @@ your configured provider.
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 388 passed, 5 skipped
+.\.venv\Scripts\python.exe -m pytest          # 470 passed, 5 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
@@ -506,7 +631,7 @@ The 5 skipped tests are **live** tests that need a running provider. They are op
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
 
-With a provider running the whole suite is green: **393 passed**, including real
+With a provider running the whole suite is green: **475 passed**, including real
 chat calls, real embeddings, and a full upload → retrieve → cite cycle.
 
 The Supabase side has its own live checks. Each creates throwaway users with the
@@ -517,10 +642,14 @@ admin key, runs real requests, and deletes what it created:
 .\.venv\Scripts\python.exe scripts\check_rls.py        # tenant isolation via the REST API
 .\.venv\Scripts\python.exe scripts\check_store.py      # the application's store, end to end
 .\.venv\Scripts\python.exe scripts\check_storage.py    # bucket policies with two real users
+.\.venv\Scripts\python.exe scripts\check_analytics.py  # demo dataset + SQL function, end to end
+.\.venv\Scripts\python.exe scripts\check_web_search.py # live search; exits 1 without a key
 ```
 
 The service-role key is used by those scripts only. The application never reads
-it.
+it. `check_web_search.py` is honest about absence: without `TAVILY_API_KEY` it
+exits 1 saying "not configured", because a green check that never searched
+anything would be a lie.
 
 The default suite never touches the network. It runs the real application code —
 real parsers, real SQLite store, real ranking — against an in-process fake chat
@@ -572,6 +701,10 @@ Every expected failure has a stable `code` and an actionable message:
 | `token_expired` | 401 | correctly signed, but past its `exp` |
 | `auth_unavailable` | 503 | JWKS unreachable and no cached keys to verify with |
 | `authentication_not_configured` | 503 | an `X-User-Id` request outside development/test with no Supabase Auth |
+| `web_search_not_configured` | 503 | a research or web-sourced request needs search and `TAVILY_API_KEY` is not set |
+| `web_search_failed` | 502 | the search provider failed or returned an unusable response |
+| `analytics_query_rejected` | 400 | the generated SQL failed the read-only guard on both attempts |
+| `analytics_query_failed` | 400 | the generated SQL was refused or failed in the database on both attempts |
 
 Notes on the less obvious ones:
 
@@ -617,7 +750,7 @@ Responses include `request_id`, which also appears in the logs and in the
 | 3 | RAG: upload, parse, chunk, embed, retrieve | ✅ done |
 | 4 | Supabase: schema, Auth, Storage, RLS, persistence | ✅ done |
 | 5 | LangGraph workflow + state | ✅ done |
-| 6 | Tools & specialist agents + report generation | ⬜ |
+| 6 | Tools & specialist agents + report generation | ✅ done |
 | 7 | Security, audit logging, rate limits, SQL safety | ⬜ |
 | 8 | React + TypeScript frontend | ⬜ |
 | 9 | Tests, Docker, deployment docs | ⬜ |

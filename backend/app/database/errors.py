@@ -68,3 +68,37 @@ class EmbeddingDimensionMismatchError(AppError):
             "restore the previous EMBEDDING_MODEL."
         )
         self.public_message = self.message
+
+
+class AnalyticsQueryRejectedError(AppError):
+    """A generated query was refused before execution.
+
+    Raised by :func:`app.database.sql_guard.validate_readonly_sql` and by the
+    ``run_demo_query`` SQL function (which mirrors those rules so the database
+    rejects one too, not only the application). The analyst agent treats this as
+    repairable: it feeds the message back to the model and tries once more.
+    """
+
+    status_code = 400
+    code = "analytics_query_rejected"
+    public_message = "The generated query was rejected: it must be a single read-only SELECT statement."
+
+
+class AnalyticsQueryFailedError(AppError):
+    """The database ran (or tried to run) a query and it failed.
+
+    Typical causes: an unknown column or table, a syntax error a small model
+    produced, or a statement that exceeded the timeout. Also repairable once:
+    ``repair_hint`` carries the database's own complaint, which is exactly the
+    feedback a model needs to correct its query. That text stays in the log and
+    the repair loop - it is never the client-facing message, because Postgres
+    error strings can name schema objects the caller should not learn about.
+    """
+
+    status_code = 400
+    code = "analytics_query_failed"
+    public_message = "The generated query failed. The server log has the database's detail."
+
+    def __init__(self, *, repair_hint: str | None = None) -> None:
+        super().__init__()
+        self.repair_hint = repair_hint or self.public_message

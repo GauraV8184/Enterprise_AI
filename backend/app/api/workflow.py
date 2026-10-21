@@ -1,20 +1,28 @@
 """The supervisor workflow endpoint.
 
-One endpoint decides how a request should be answered - conversationally, or
-from the caller's own documents - and answers with the same code the dedicated
-endpoints use. The decision travels back with the answer, so a caller can
-always see which capability ran and whether grounding applies.
+One endpoint decides how a request should be answered - conversationally, from
+the caller's own documents, from live web search, from SQL over the demo
+dataset, or as a Markdown report - and answers with the same code the dedicated
+endpoints use. The decision travels back with the answer, so a caller can always
+see which capability ran and whether grounding applies.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.deps import ChatModelDep, EmbeddingsDep, RepositoryDep, SettingsDep
+from app.api.deps import (
+    ChatModelDep,
+    EmbeddingsDep,
+    RepositoryDep,
+    SettingsDep,
+    WebSearchDep,
+)
 from app.core.logging import get_logger, request_id_ctx, safe_extra
 from app.graph.workflow import run_workflow
 from app.schemas.chat import TokenUsage
 from app.schemas.documents import SourceCitation
+from app.schemas.evidence import AnalyticsEvidence, WebSource
 from app.schemas.workflow import WorkflowRequest, WorkflowResponse
 from app.security.identity import CurrentUserDep
 
@@ -34,12 +42,13 @@ async def run_supervisor(
     repository: RepositoryDep,
     embeddings: EmbeddingsDep,
     settings: SettingsDep,
+    web_search: WebSearchDep,
     user: CurrentUserDep,
 ) -> WorkflowResponse:
     """Run one request through the supervisor graph.
 
-    A classification or provider failure is reported as an error; the graph
-    has no fallback that would answer with a guess.
+    A classification, retrieval, search, SQL, or provider failure is reported as
+    an error; the graph has no fallback that would answer with a guess.
     """
     state = await run_workflow(
         model,
@@ -52,9 +61,14 @@ async def run_supervisor(
         top_k=settings.retrieval_top_k,
         max_context_chars=settings.max_context_chars,
         min_score=settings.retrieval_min_score,
+        web_search=web_search,
+        analytics_max_rows=settings.analytics_max_rows,
+        web_max_results=settings.web_search_max_results,
     )
 
     sources = state.get("sources", [])
+    web_sources = state.get("web_sources", [])
+    analytics = state.get("analytics")
     logger.info(
         "workflow_completed",
         extra=safe_extra(
@@ -62,6 +76,8 @@ async def run_supervisor(
             intent=state["intent"].intent,
             grounded=state.get("grounded"),
             sources=len(sources),
+            web_sources=len(web_sources),
+            analytics_rows=analytics.row_count if analytics else 0,
             searched_chunks=state.get("searched_chunks", 0),
         ),
     )
@@ -74,6 +90,11 @@ async def run_supervisor(
         grounded=state.get("grounded"),
         sources=[SourceCitation.from_match(index, match) for index, match in enumerate(sources, 1)],
         searched_chunks=state.get("searched_chunks", 0),
+        web_sources=[
+            WebSource.from_result(f"W{index}", result)
+            for index, result in enumerate(web_sources, 1)
+        ],
+        analytics=AnalyticsEvidence.from_result(analytics) if analytics else None,
         provider=settings.llm_provider,
         model=settings.openai_model,
         usage=TokenUsage(**usage.__dict__) if usage else None,

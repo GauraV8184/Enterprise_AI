@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
-from tests.fakes import FakeChatModel, HashingEmbeddings
+from tests.fakes import FakeChatModel, FakeWebSearch, HashingEmbeddings
 
 
 @pytest.fixture
@@ -88,6 +88,32 @@ def rag_client(
     with TestClient(app) as test_client:
         app.state.chat_model = fake_model
         app.state.embeddings = fake_embeddings
+        yield test_client
+
+
+@pytest.fixture
+def fake_web_search() -> FakeWebSearch:
+    """Empty by default; tests set ``.results`` to control what searches return."""
+    return FakeWebSearch()
+
+
+@pytest.fixture
+def web_client(
+    app: FastAPI,
+    fake_model: FakeChatModel,
+    fake_embeddings: HashingEmbeddings,
+    fake_web_search: FakeWebSearch,
+) -> Iterator[TestClient]:
+    """TestClient with fakes for the model, embeddings, and web search.
+
+    ``app.state.web_search`` is set after startup for the same reason the chat
+    model is: the lifespan runs first and fills the slot with whatever the
+    test settings configure (nothing, since there is no TAVILY_API_KEY).
+    """
+    with TestClient(app) as test_client:
+        app.state.chat_model = fake_model
+        app.state.embeddings = fake_embeddings
+        app.state.web_search = fake_web_search
         yield test_client
 
 

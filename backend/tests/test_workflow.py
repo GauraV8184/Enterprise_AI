@@ -13,11 +13,12 @@ import numpy as np
 import pytest
 
 from app.database.repositories import ChunkRecord, DocumentRepository, new_id
-from app.graph.workflow import route_for_intent, run_workflow
+from app.graph.workflow import route_for_intent, run_workflow, sources_for_intent
 from app.llm.errors import LlmProviderError
 from app.llm.prompts import DEFAULT_SYSTEM_PROMPT
-from app.llm.schemas import TaskIntent
-from tests.fakes import FakeChatModel, HashingEmbeddings, make_status_error
+from app.llm.schemas import AnalyticsQuery, SearchPlan, TaskIntent
+from app.tools.web_search import WebResult, WebSearchNotConfiguredError
+from tests.fakes import FakeChatModel, FakeWebSearch, HashingEmbeddings, make_status_error
 
 LEAVE_TEXT = (
     "Every full-time employee accrues twenty days of paid annual leave per calendar "
@@ -88,11 +89,34 @@ def embeddings() -> HashingEmbeddings:
     return HashingEmbeddings()
 
 
-def test_route_for_intent_sends_document_needs_to_the_corpus() -> None:
+def test_route_for_intent_prefers_report_then_documents_then_the_rest() -> None:
+    # Report wins outright: it is the route that gathers more than one source.
+    assert route_for_intent(make_intent("report")) == "report"
+    assert route_for_intent(make_intent("report", documents=True, business=True)) == "report"
+
+    # Documents win over the other single-source routes.
     assert route_for_intent(make_intent("document_question", documents=True)) == "documents"
-    assert route_for_intent(make_intent("report", documents=True)) == "documents"
+    assert route_for_intent(make_intent("general_chat", documents=True)) == "documents"
+
+    # Explicit intents and flags map to their capabilities.
+    assert route_for_intent(make_intent("research")) == "research"
+    assert route_for_intent(make_intent("general_chat", web=True)) == "research"
+    assert route_for_intent(make_intent("data_analysis")) == "analytics"
+    assert route_for_intent(make_intent("general_chat", business=True)) == "analytics"
+
     assert route_for_intent(make_intent("general_chat")) == "chat"
-    assert route_for_intent(make_intent("research")) == "chat"
+
+
+def test_sources_for_intent_maps_flags_to_evidence() -> None:
+    assert sources_for_intent(make_intent("report")) == ["documents"]
+    assert sources_for_intent(make_intent("report", documents=True, business=True)) == [
+        "documents",
+        "analytics",
+    ]
+    assert sources_for_intent(make_intent("research", business=True, web=True)) == [
+        "analytics",
+        "web",
+    ]
 
 
 async def test_general_chat_routes_to_chat(
@@ -175,12 +199,12 @@ async def test_document_question_routes_to_documents_with_citations(
     assert state["usage"] is None
 
 
-async def test_internal_documents_flag_wins_over_the_intent_label(
+async def test_internal_documents_flag_wins_over_other_single_source_intents(
     repository: DocumentRepository, embeddings: HashingEmbeddings
 ) -> None:
     seed_document(repository, embeddings)
     model = make_model(
-        make_intent("report", documents=True, business=True, complexity="multi_step")
+        make_intent("research", documents=True, web=True, complexity="multi_step")
     )
     model.replies = ["According to [1], twenty days."]
 
@@ -259,3 +283,150 @@ async def test_answer_failure_surfaces_from_the_chat_route(
             max_context_chars=4000,
             min_score=0.1,
         )
+
+
+WEB_RESULT = WebResult(
+    title="Leave law update",
+    url="https://example.com/leave-law",
+    content="Statutory leave remains 28 days.",
+    score=0.8,
+)
+
+
+async def test_data_questions_route_to_sql_and_return_the_rows(
+    repository: DocumentRepository, embeddings: HashingEmbeddings
+) -> None:
+    model = FakeChatModel(
+        replies=["The catalogue holds 4 products."],
+        structured_results=[
+            make_intent("data_analysis", business=True),
+            AnalyticsQuery(
+                sql="select count(*) as n from demo_products",
+                reasoning="Counts catalogue products.",
+            ),
+        ],
+    )
+
+    state = await run_workflow(
+        model,
+        repository,
+        embeddings,
+        owner_id=ALICE,
+        question="How many products are in the demo catalogue?",
+        top_k=5,
+        max_context_chars=4000,
+        min_score=0.1,
+    )
+
+    assert state["route"] == "analytics"
+    assert state["grounded"] is True
+    assert state["analytics"].rows == [{"n": 4}]
+    assert state["sources"] == []
+    assert state["answer"] == "The catalogue holds 4 products."
+
+
+async def test_research_questions_route_to_web_search(
+    repository: DocumentRepository, embeddings: HashingEmbeddings
+) -> None:
+    model = FakeChatModel(
+        replies=["Statutory leave remains 28 days [W1]."],
+        structured_results=[
+            make_intent("research", web=True),
+            SearchPlan(queries=["statutory leave uk"]),
+        ],
+    )
+
+    state = await run_workflow(
+        model,
+        repository,
+        embeddings,
+        owner_id=ALICE,
+        question="What is the current statutory leave entitlement?",
+        top_k=5,
+        max_context_chars=4000,
+        min_score=0.1,
+        web_search=FakeWebSearch(results=[WEB_RESULT]),
+    )
+
+    assert state["route"] == "research"
+    assert state["grounded"] is True
+    assert [source.url for source in state["web_sources"]] == [WEB_RESULT.url]
+    assert state["web_queries"] == ["statutory leave uk"]
+    assert "[W1]" in state["answer"]
+
+
+async def test_research_without_a_provider_fails_as_503(
+    repository: DocumentRepository, embeddings: HashingEmbeddings
+) -> None:
+    model = FakeChatModel(structured_results=[make_intent("research", web=True)])
+
+    with pytest.raises(WebSearchNotConfiguredError):
+        await run_workflow(
+            model,
+            repository,
+            embeddings,
+            owner_id=ALICE,
+            question="What is the latest news on leave law?",
+            top_k=5,
+            max_context_chars=4000,
+            min_score=0.1,
+            web_search=None,
+        )
+
+
+async def test_report_questions_write_markdown_from_the_flagged_sources(
+    repository: DocumentRepository, embeddings: HashingEmbeddings
+) -> None:
+    seed_document(repository, embeddings)
+    model = FakeChatModel(
+        replies=["# Report\n\nTwenty days [1] and 4 products."],
+        structured_results=[
+            make_intent("report", documents=True, business=True),
+            AnalyticsQuery(
+                sql="select count(*) as n from demo_products",
+                reasoning="Counts catalogue products.",
+            ),
+        ],
+    )
+
+    state = await run_workflow(
+        model,
+        repository,
+        embeddings,
+        owner_id=ALICE,
+        question="Report on the leave policy and the product catalogue.",
+        top_k=3,
+        max_context_chars=4000,
+        min_score=0.1,
+    )
+
+    assert state["route"] == "report"
+    assert state["grounded"] is True
+    assert state["answer"].startswith("# Report")
+    assert [source.filename for source in state["sources"]] == ["handbook.txt"]
+    assert state["analytics"].rows == [{"n": 4}]
+
+
+async def test_report_without_evidence_is_stated_but_not_invented(
+    repository: DocumentRepository, embeddings: HashingEmbeddings
+) -> None:
+    model = FakeChatModel(
+        replies=["This must not be used."],
+        structured_results=[make_intent("report")],
+    )
+
+    state = await run_workflow(
+        model,
+        repository,
+        embeddings,
+        owner_id=ALICE,
+        question="Report on the missing leave policy.",
+        top_k=3,
+        max_context_chars=4000,
+        min_score=0.1,
+    )
+
+    assert state["route"] == "report"
+    assert state["grounded"] is False
+    assert "No evidence was found" in state["answer"]
+    assert model.received == []

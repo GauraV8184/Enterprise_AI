@@ -28,6 +28,7 @@ from app.llm.errors import LlmNotConfiguredError
 from app.llm.factory import build_chat_model, build_embeddings
 from app.security.supabase_auth import SupabaseTokenVerifier
 from app.storage.local import LocalFileStore
+from app.tools.web_search import build_web_search
 
 logger = get_logger(__name__)
 
@@ -164,11 +165,27 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             ),
         )
 
+    app.state.web_search = build_web_search(settings)
+    if app.state.web_search is None:
+        logger.info(
+            "web_search_not_configured",
+            extra=safe_extra(
+                hint="Set TAVILY_API_KEY in the repository-root .env file to enable the research route",
+            ),
+        )
+    else:
+        logger.info("web_search_ready", extra=safe_extra(provider="tavily"))
+
     yield
 
     if app.state.supabase_http is not None:
         app.state.supabase_http.close()
         app.state.supabase_http = None
+    if app.state.web_search is not None:
+        close = getattr(app.state.web_search, "close", None)
+        if close is not None:
+            close()
+        app.state.web_search = None
     app.state.chat_model = None
     app.state.embeddings = None
     app.state.token_verifier = None

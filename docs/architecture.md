@@ -132,8 +132,12 @@ recommendation.
 
 ## 7. What is intentionally NOT here yet
 
-- No specialist agents or tools — Phase 6. The Phase 5 supervisor exists and
-  routes between the two answer paths that are backed by real code (see §16).
+- All five supervisor routes exist now (§16–§17), each backed by real code; a
+  route whose tool is not configured fails with a typed 503 rather than
+  degrading. What is still missing is the Phase 7 hardening around them: real
+  prompt-injection enforcement, audit logging, and rate limits. The SQL path
+  already ships its own guard (§17), because executing generated SQL without
+  one would not be defensible even temporarily.
 - No download endpoint for original files, and no signed URLs. Uploads and deletes
   use Storage; reading an original back is only done internally for indexing.
 - No janitor for the rare partial delete: if the object is removed and the row
@@ -616,44 +620,47 @@ There is no download endpoint, so no signed URLs either; the API still never
 serves the original file. There is no janitor for orphaned objects. Indexing is
 still synchronous, now with one extra network round trip.
 
-## 16. The supervisor workflow (Phase 5)
+## 16. The supervisor workflow (Phase 5, extended in Phase 6)
 
 Phase 5 adds `app/graph/`, exposed as `POST /api/workflow/run`. It is a LangGraph
-`StateGraph` with one decision node and two answer nodes:
+`StateGraph` with one decision node and five answer nodes:
 
 ```
         START
           |
-      classify            reads the request, emits the structured TaskIntent
+      classify               reads the request, emits the structured TaskIntent
           |
-   route_for_intent       pure function of the intent
-      /        \
- answer_directly  answer_from_documents
- (chat)           (retrieval + citations)
-      \        /
+   route_for_intent          pure function of the intent
+      /    |    |    \    \
+answer_ answer_ answer_ answer_ write_
+directly from_  from_   from_   report
+(chat)   docu-  research data    (Markdown from the requested sources)
+         ments  ([W1],…) (SQL)
+      \    |    |    /    /
         END
 ```
 
 ### The routing rule is a pure function
 
-`route_for_intent(intent)` returns `"documents"` when the classification says
-the request is a document question *or* that internal documents are required;
-everything else goes to `"chat"`. Because the rule is pure, it is tested
-directly without a model, and the conditional edge reads the route the classify
-node already recorded - the decision is made once, stored in the state, and
-never recomputed.
+`route_for_intent(intent)` checks, in order: `report` wins outright (it is the
+only route that gathers from more than one source); then a document question or
+the internal-documents flag; then research; then analytics; everything else is
+`chat`. Because the rule is pure, it is tested directly without a model, and the
+conditional edge reads the route the classify node already recorded - the
+decision is made once, stored in the state, and never recomputed.
 
-The rule only names capabilities that exist. Business-data, web-research and
-report routes arrive in Phase 6 with their tools; routing a request to a
-capability that cannot answer it would be a lie.
+A route only exists with its tool. Each node below depends on real, tested code,
+and a missing dependency fails loudly (the research route answers 503 without
+`TAVILY_API_KEY`) instead of degrading into a guess.
 
 ### State
 
 `WorkflowState` is a `TypedDict` with `total=False`, because LangGraph merges
 each node's return value into the running state. Inputs (`question`, `history`,
 `owner_id`, `document_ids`), the decision (`intent`, `route`), and the output
-(`answer`, `grounded`, `sources`, `searched_chunks`, `usage`) each have exactly
-one writer, so no reducer is needed for anything.
+(`answer`, `grounded`, `sources`, `searched_chunks`, `web_sources`,
+`web_queries`, `analytics`, `usage`) each have exactly one writer, so no reducer
+is needed for anything.
 
 ### The graph is compiled per request
 
@@ -671,13 +678,145 @@ every call, which is exactly the coupling the store contract exists to avoid.
   refusal: when nothing is retrieved the model is not called and `grounded` is
   `false`.
 - `grounded` is `null` on the chat route rather than a misleading `false`,
-  because grounding does not apply there.
+  because grounding does not apply there. It is `true`/`false` on the four
+  evidence routes, and `false` always means no model was asked to answer.
+- The Phase 6 routes extend the same rules (see §17): no search key is a 503,
+  no search results means no synthesis call, and a report with no evidence is a
+  short Markdown body that says so.
 
 ### Testing it
 
-The graph tests drive the fake chat model with a controlled
-`structured_result`, so both routes are exercised deterministically, alongside
-the real SQLite store and real ranking. `scripts/check_workflow.py` proves both
-routes against the configured provider: a greeting must route to chat, and a
-question over a throwaway document must route to documents, come back grounded,
-and cite `[1]`.
+The graph tests drive the fake chat model with a controlled queue of structured
+results (classify, then SQL generation, then search planning - the order the app
+would make them), so all five routes are exercised deterministically alongside
+the real SQLite store, the real demo dataset, and real ranking.
+`scripts/check_workflow.py` proves every configured route against the live
+provider: a greeting must route to chat; a question over a throwaway document
+must route to documents and cite `[1]`; a data question must route to analytics
+and return rows; a report request must come back as grounded Markdown; and -
+when a search key is present - a research question must cite `[W1]`. The
+research leg is skipped honestly, not faked, when no key is configured.
+
+## 17. Tools and specialist agents (Phase 6)
+
+Phase 6 adds `app/tools/` (SQL analytics, web search), `app/agents/` (analyst,
+research, report), the three new supervisor routes, and `POST /api/reports`.
+
+### Three agents, three responsibilities
+
+| Module | Does | Deliberately does not |
+|---|---|---|
+| `analyst.py` | generates one SQL query, runs it, repairs it once, summarises the rows | show raw database errors to the caller - only the repair hint sees them |
+| `research.py` | plans queries, runs them, deduplicates results, cites `[W1]`… | invent a source, or call the model when a search returned nothing |
+| `report.py` | gathers the evidence it was asked for, writes Markdown with working labels | widen the source list, or write from general knowledge |
+
+Each takes its dependencies (store, model, search provider) as arguments and
+returns a plain dataclass, so the agents are testable without FastAPI and
+without a network.
+
+### The demo dataset, seeded twice
+
+`demo_products` and `demo_sales_orders` (4 × 4 × 24 = 384 orders) are
+deliberately **demonstration data**, marked as such in table comments, the
+schema description handed to the model, and the README. Migration `0005` seeds
+them in Postgres with `INSERT ... SELECT`; the SQLite store seeds the identical
+rows from `app/database/demo_data.py`. The two seeds must agree, so the offline
+store tests and the live `check_analytics.py` both compute expected values from
+the Python generator and compare them against what the database actually
+returned - a drifting seed fails a test instead of silently changing answers.
+
+`order_date` is an ISO `YYYY-MM-DD` **string** on purpose: year and month
+grouping become `substr(order_date, 1, 4)` / `substr(order_date, 1, 7)`, which
+is valid in both dialects, so generated SQL does not need dialect-specific date
+functions the small model would get wrong.
+
+### SQL execution is bounded in three layers
+
+Executing model-generated SQL is the most dangerous thing this platform does, so
+the bounds are independent, and each fails closed:
+
+1. **`app/database/sql_guard.py`** - a string-level pre-flight: exactly one
+   statement, must start with `SELECT`/`WITH`, a keyword blocklist (including
+   `do`, `set`, `lock`, `begin`…), no semicolon anywhere (comments included),
+   and a 4000-character limit. It is conservative and says which rule it broke,
+   because that message is fed back to the model as repair feedback.
+2. **`run_demo_query()` in migration `0005`** - the guard repeated in plpgsql,
+   an outer `LIMIT` capped at 200 (default 100, `ANALYTICS_MAX_ROWS`),
+   `statement_timeout = 5s`, and - the part that does not depend on any string
+   check - `STABLE` plus `SECURITY INVOKER`. PostgreSQL refuses
+   data-modifying statements inside a non-volatile function, and because the
+   function runs with the caller's own privileges it cannot read anything RLS
+   would hide from them. The `anon` role cannot execute it at all.
+3. **Row Level Security** - authenticated callers may read the demo tables;
+   nobody has write policies; `anon` has no grants.
+
+PostgREST error mapping makes the layers distinguishable: `P0001` from the
+function becomes `AnalyticsQueryRejectedError` (safe to show), while any other
+RPC failure - including SQLSTATE `57014` for the timeout - becomes
+`AnalyticsQueryFailedError`, whose `repair_hint` holds the database's complaint
+for the repair loop and never reaches the client.
+
+### The repair loop stops at one retry
+
+`MAX_QUERY_ATTEMPTS = 2`: one generation plus one repair. Only *rejected* or
+*failed* queries are retried, with the last error's `repair_hint or message` as
+feedback; anything else (auth, network, provider) propagates immediately rather
+than being retried pointlessly. If the second attempt also fails, the last error
+is raised - the agent never returns a "best effort" answer built on a query it
+could not run.
+
+### Web search is plain `httpx`
+
+Tavily is one `POST` with a JSON body and a JSON reply, so `app/tools/web_search.py`
+talks to it directly instead of adding an SDK dependency. The provider is built
+once in the lifespan and exposed as `WebSearchDep`, which returns `None` rather
+than raising when no key is configured - chat, documents and analytics must keep
+working without one. The raised 503 belongs to the moment a search is actually
+attempted. Results without a URL are dropped; snippets are whitespace-collapsed
+and truncated; `max_results` is capped at 10.
+
+### Structured calls do not report usage
+
+`structured_completion` shares the validation path with `classify_intent`, and
+like it does not report token usage - so `usage` in the API responses is the
+answering call only. The field description says so, in the schema, where a
+caller will read it.
+
+### Reports: evidence in, evidence out
+
+`POST /api/reports` gathers exactly the requested sources (`documents`,
+`analytics`, `web`; default `["documents"]`, deduplicated, never widened) and
+returns the Markdown **and** the evidence it was written from: document
+citations labelled `[1]`, web results labelled `W1`, and the SQL plus rows for
+analytics. Labels are strings for web results precisely so a mixed report can
+never render `[1]` and `W1` ambiguously.
+
+Requested sources that return nothing are recorded as *gaps* and named in the
+prompt ("Requested sources that returned no evidence: …"), so the report says
+what it could not cover instead of padding. When **no** requested source
+returns evidence, the response is built by code - a short Markdown body stating
+that no evidence was found, listing the gaps - and the model is not called at
+all. `grounded` is `false` in that case, mirroring RAG's empty-corpus rule.
+
+### What the live checks proved
+
+- `scripts/check_analytics.py` (22 checks, live Supabase): the SQL-seeded rows
+  match `demo_data.py` to the cent (total revenue 1,891,260.00 across 384
+  orders), a second user reads the same rows, the outer cap holds against an
+  inner `limit 1000`, the database itself refuses an `INSERT`, a second
+  statement, a `DROP`, and a blocked keyword inside a string literal, an unknown
+  column comes back as a repair hint, `pg_sleep(15)` is cancelled after ~5.2s,
+  and `anon` is refused with 401. The throwaway users are deleted afterwards.
+- `scripts/check_web_search.py` exits 1 with "not configured" on this machine,
+  because there is no `TAVILY_API_KEY` here. That is reported as what it is -
+  an unverified leg - not as a passing check.
+- `scripts/check_workflow.py`: the first live run **failed one check honestly** -
+  the local 8B model classified a "which region had the most revenue" question
+  as a `report`, which is what the documented priority says must happen (report
+  wins outright), so the check's question was reworded to an unambiguous count
+  and the classifier probe confirmed it routes to `analytics`. A later run also
+  hit the 60s `LLM_TIMEOUT_SECONDS` on the report leg (local-model variance,
+  the earlier run had completed); the final run used
+  `LLM_TIMEOUT_SECONDS=240` and all 15 checks passed. The research leg skipped
+  itself with an explanation. None of this was hidden or silently retried into
+  a green result.
