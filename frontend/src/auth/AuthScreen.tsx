@@ -75,7 +75,7 @@ export function AuthScreen() {
   }
 
   return (
-    <div className="auth-page">
+    <main className="auth-page">
       <section className="auth-story" aria-label="Platform overview">
         <div className="auth-brand">
           <span className="brand-mark" aria-hidden="true">
@@ -128,6 +128,16 @@ export function AuthScreen() {
 
       <section className="auth-panel" aria-label="Sign in">
         <div className="auth-card">
+          <div className="auth-mobile-brand" aria-hidden="true">
+            <span className="brand-mark brand-mark-sm">
+              <Sparkles size={15} strokeWidth={2} />
+            </span>
+            <span>
+              <strong>Enterprise AI</strong>
+              <small>Intelligence Platform</small>
+            </span>
+          </div>
+
           {isMisconfigured ? (
             <div className="auth-config">
               <span className="icon-chip icon-chip-warning">
@@ -268,6 +278,6 @@ export function AuthScreen() {
           )}
         </div>
       </section>
-    </div>
+    </main>
   );
 }
