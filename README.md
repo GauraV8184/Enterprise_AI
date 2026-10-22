@@ -141,9 +141,10 @@ Enterprize_AI/
 |---|---|
 | Python | 3.11+ (developed on 3.13) |
 | Node.js | 20+ (needed from Phase 8) |
+| Docker | 29.9+ (needed from Phase 9) |
 
-Docker is not required for local development and is not yet installed on the
-development machine, so container files arrive in Phase 9.
+Docker is not required for local development. Docker Desktop is installed and
+verified (29.9.2); the Dockerfile and Compose setup arrive in Phase 9.
 
 ---
 
