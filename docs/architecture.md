@@ -1,15 +1,15 @@
 # Architecture — Enterprise AI Intelligence Platform
 
-This note explains how the backend is put together and why, focusing on what
-exists after **Phase 7**. It is written to be read by someone learning the
+This note explains how the system is put together and why, focusing on what
+exists after **Phase 8**. It is written to be read by someone learning the
 stack, so it favors plain language over jargon.
 
 ## 1. High-level shape
 
 The platform is a three-layer system:
 
-1. **Frontend** — React + TypeScript (Vite). Not built yet (Phase 8). It will
-   only ever talk to the backend over HTTP.
+1. **Frontend** — React 19 + TypeScript (Vite), built in Phase 8. It only ever
+   talks to the backend over HTTP and receives only the public Supabase anon key.
 2. **Backend** — FastAPI (Python). This is where all logic, credentials, LLM
    calls, database access, and permission checks live.
 3. **Data & services** — Supabase (PostgreSQL, pgvector, Auth, Storage) plus the
@@ -1003,3 +1003,99 @@ default; setting `RATE_LIMIT_ENABLED=false` logs a warning in production.
 - Migration `0006` creates a database role, so the migration runner must have
   the privilege to do that. On Supabase that is the `postgres` connection used
   by `apply_migrations.py`.
+
+## 19. Frontend (Phase 8)
+
+The frontend is a client-side React 19 + TypeScript application built with Vite.
+It is deliberately a thin, typed client: it renders state, collects input, and
+calls the API. It does not query Postgres, call an LLM directly, or hold the
+service-role key.
+
+### Package layout
+
+```
+frontend/src/
+  api/
+    client.ts      typed fetch wrapper; one function per endpoint
+    errors.ts      ApiError parsing and user-facing messages
+    types.ts       mirrors of the public backend schemas
+  auth/
+    AuthProvider.tsx  session restore, dev identity, API client lifetime
+    AuthScreen.tsx    email/password sign-in and sign-up
+  components/      shell, evidence panels, Markdown, dialogs, empty/loading states
+  hooks/           API health, document title, textarea auto-resize
+  lib/             runtime config, formatting, upload validation
+  pages/           overview, chat, documents, ask, reports, settings, 404
+  App.tsx          auth gate, lazy routes, scroll reset, error boundary
+  styles.css       responsive layout, dark theme, print rules
+```
+
+### Authentication and the API boundary
+
+`AuthProvider` creates **one** Supabase client at module scope. Creating it in a
+component or state initializer makes React StrictMode build a second client and
+triggers Supabase's duplicate-client warning. The provider restores an existing
+session, subscribes to auth changes, and refreshes a token that is close to
+expiry before a request.
+
+The client sends exactly one of two identities:
+
+- `Authorization: Bearer <access-token>` when both Supabase environment values
+  are present;
+- `X-User-Id: <id>` only when neither is present, for development.
+
+A half-configured Supabase environment raises a typed configuration error; it
+never silently downgrades to the stub. The browser receives only the public
+Supabase anon key. RLS and the backend's identity dependency remain the
+authority; hiding a button is not a permission check.
+
+`api/client.ts` has a single `fetch` path. It sets the auth header, serialises
+JSON or `FormData`, maps network failures to `ApiError`, parses the backend's
+stable `{code, message, details, request_id}` shape for non-2xx responses, and
+returns typed public models. This is why screens can show `503
+web_search_not_configured` and a retry action instead of raw JSON.
+
+### Screens and evidence
+
+- **Overview** requests health, documents and model status in parallel.
+- **Chat** is explicitly ungrounded; it is a direct model conversation and does
+  not pretend to have citations.
+- **Documents** uploads files, polls indexing status, lists/deletes documents,
+  runs semantic search, and asks grounded questions. Answers carry numbered
+  document citations and the retrieved passages.
+- **Ask supervisor** submits one request, shows the route and classification
+  badges, and renders document, web or analytics evidence. It does not choose
+  or override the backend's route.
+- **Reports** can select documents, analytics, web research or a combination.
+  The returned Markdown is rendered with `react-markdown` + `remark-gfm`; raw
+  HTML is not enabled. Copy, `.md` download and print are client-side actions.
+- **Settings** shows the active auth mode, lets a developer change the stub id,
+  and exposes model/API information without exposing secrets.
+
+Evidence panels are shared components. Document evidence shows filename, page,
+score and excerpt; web evidence shows title, URL and snippet; analytics evidence
+shows the executed SQL, row count, truncation state and returned rows. Empty or
+failed source sets are shown as empty or failed — the UI does not fill gaps with
+model text.
+
+### Routing and responsive behaviour
+
+Routes use `React.lazy`; `AppShell` wraps `<Outlet />` in `Suspense`, so the
+navigation shell stays visible while a page chunk loads. `BrowserRouter` keeps
+deep links working behind Vite's history fallback. The sidebar is persistent on
+wide screens and becomes an off-canvas menu below the mobile breakpoint; tables
+scroll horizontally, dialogs trap the viewport, and print styles remove the
+navigation.
+
+### What Phase 8 does not claim
+
+- The UI is not a security boundary. Every ownership, upload, SQL and audit
+  check still happens in the backend.
+- The supervisor screen displays the backend's route decision. A borderline
+  request can be classified as `report` instead of `analytics` by the configured
+  model; the frontend correctly renders the route it was given.
+- Web research still needs `TAVILY_API_KEY`; a missing key is shown as the typed
+  `503`, not as an empty answer.
+- Docker, container validation, a production web server and CDN cache headers
+  are Phase 9 work. The Phase 8 deliverable is the verified static `dist/` build
+  and the development proxy.

@@ -6,24 +6,25 @@ it retrieves internal documents (RAG), queries authorized business data safely
 reports — all coordinated by a LangGraph workflow behind a FastAPI backend and
 a React frontend.
 
-> **Status: Phase 7 of 9 complete, verified against live providers.** Phases 1–7
-> — foundation, LLM integration, RAG over uploaded documents, Supabase
-> persistence with Row Level Security, the LangGraph supervisor, the specialist
-> agents (SQL analytics, web research, Markdown reports), and security hardening
-> (per-caller rate limits, an append-only audit trail, prompt-injection
-> defences, restricted analytics execution, and production response headers) —
-> work end to end. Validation used a local Ollama `llama3.1:8b` and the live
-> Supabase project. Web research needs `TAVILY_API_KEY`; without it the research
-> route answers a typed 503, and `check_web_search.py` exits 1 saying "not
-> configured" rather than pretending to pass. Later phases add the React UI and
-> deployment. See [Roadmap](#roadmap).
+> **Status: Phase 8 of 9 complete, verified against live providers and a live
+> Supabase project.** Phases 1–8 — foundation, LLM integration, RAG over
+> uploaded documents, Supabase persistence with Row Level Security, the
+> LangGraph supervisor, the specialist agents (SQL analytics, web research,
+> Markdown reports), security hardening (per-caller rate limits, an append-only
+> audit trail, prompt-injection defences, restricted analytics execution, and
+> production response headers), and the React + TypeScript frontend — work end
+> to end. Validation used a local Ollama `llama3.1:8b` and live Supabase Auth.
+> Web research needs `TAVILY_API_KEY`; without it the research route answers a
+> typed 503, and `check_web_search.py` exits 1 saying "not configured" rather
+> than pretending to pass. Phase 9 adds container packaging and deployment. See
+> [Roadmap](#roadmap).
 
 ---
 
 ## Architecture at a glance
 
 ```
-React + TypeScript (Vite)        -> frontend (Phase 8)
+React + TypeScript (Vite)        -> frontend (Phase 8 ✅)
         |  HTTPS / JSON
         v
 FastAPI backend  (this repo: backend/)
@@ -38,8 +39,8 @@ FastAPI backend  (this repo: backend/)
    `-- database/ repositories                        <- Phase 4 ✅
         |
         v
-Supabase: PostgreSQL + pgvector + Auth + Storage   <- Phase 4
-LLM provider: OpenAI (configurable)                <- Phase 2 ✅
+Supabase: PostgreSQL + pgvector + Auth + Storage   <- Phase 4 ✅
+LLM provider: OpenAI or Ollama (configurable)      <- Phase 2 ✅
 ```
 
 The backend is the only component that holds privileged credentials. The
@@ -126,6 +127,19 @@ Enterprize_AI/
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   └── pyproject.toml
+├── frontend/                       # React 19 + TypeScript + Vite SPA
+│   ├── src/
+│   │   ├── api/                    # typed fetch client, errors, response models
+│   │   ├── auth/                   # Supabase Auth + development identity stub
+│   │   ├── components/             # shell, evidence panels, Markdown, dialogs
+│   │   ├── hooks/
+│   │   ├── lib/                    # runtime config, formatting, file validation
+│   │   ├── pages/                  # overview, chat, documents, ask, reports, settings
+│   │   ├── App.tsx                 # auth gate, lazy routes, error boundary
+│   │   └── styles.css              # responsive + print styles
+│   ├── .env.example
+│   ├── package.json
+│   └── README.md
 ├── docs/architecture.md
 ├── supabase/migrations/            # 0001-0007: schema, RLS, search, demo data, security
 ├── data/                           # git-ignored: uploads + SQLite store
@@ -140,7 +154,7 @@ Enterprize_AI/
 | Tool | Version used |
 |---|---|
 | Python | 3.11+ (developed on 3.13) |
-| Node.js | 20+ (needed from Phase 8) |
+| Node.js | 20+ (developed on 22.17) |
 | Docker | 29.9+ (needed from Phase 9) |
 
 Docker is not required for local development. Docker Desktop is installed and
@@ -149,6 +163,8 @@ verified (29.9.2); the Dockerfile and Compose setup arrive in Phase 9.
 ---
 
 ## Setup
+
+### Backend
 
 ```powershell
 cd backend
@@ -163,6 +179,20 @@ On macOS/Linux use `.venv/bin/python` instead.
 
 The app reads `.env` from the repository root no matter which directory you
 launch from.
+
+### Frontend
+
+```powershell
+cd frontend
+npm install
+Copy-Item .env.example .env.local
+```
+
+Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in `frontend/.env.local`
+to use real Supabase Auth. Leave both blank to use the development `X-User-Id`
+stub while the backend also permits it. Only the public anon key belongs in the
+browser; never put `SUPABASE_SERVICE_ROLE_KEY` or any LLM key there. Full details
+are in [`frontend/README.md`](frontend/README.md).
 
 ---
 
@@ -343,6 +373,56 @@ supervisor workflow consumes to route a request:
   "request_id": "..."
 }
 ```
+
+---
+
+## Run the web interface (Phase 8)
+
+Start the API first, then the Vite dev server:
+
+```powershell
+cd frontend
+npx vite --host 127.0.0.1
+```
+
+Open <http://127.0.0.1:5173>. Vite proxies `/api`, `/docs`, and
+`/openapi.json` to `http://127.0.0.1:8000`, so the browser talks to one origin.
+`npm run dev` also works; use `npx vite` when you need explicit host flags
+because npm 11 can consume the extra `--host` argument.
+
+The app supports two authentication modes:
+
+- **Supabase Auth** when both `VITE_SUPABASE_URL` and
+  `VITE_SUPABASE_ANON_KEY` are set. The browser sends
+  `Authorization: Bearer <access-token>`.
+- **Development identity** when both are blank. The browser sends
+  `X-User-Id`, which only works when the backend is in development/test mode and
+  permits the stub.
+
+A half-configured Supabase environment is shown as an error rather than
+silently downgrading to the stub.
+
+| Screen | What it does |
+|---|---|
+| Overview | Live health, document, model and activity summary |
+| Chat | Direct, clearly ungrounded conversation with the configured model |
+| Documents | Upload, index, delete, semantic search, grounded Q&A with citations |
+| Ask supervisor | LangGraph routing, answer, route metadata and evidence |
+| Reports | Markdown from documents, analytics and/or web research; copy, download, print |
+| Settings | Session, identity, API, model, upload limit and local preferences |
+
+Build and check the frontend with:
+
+```powershell
+cd frontend
+npm run typecheck
+npm run lint
+npm run build
+```
+
+Routes are lazy-loaded; `dist/` contains static assets for Phase 9 hosting. See
+[`frontend/README.md`](frontend/README.md) for the full setup, auth, layout and
+design notes.
 
 ---
 
@@ -729,6 +809,18 @@ $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integrat
 With a provider running the whole suite is green: **507 passed**, including real
 chat calls, real embeddings, and a full upload → retrieve → cite cycle.
 
+The frontend has its own static checks and production build:
+
+```powershell
+cd frontend
+npm run typecheck
+npm run lint
+npm run build
+```
+
+`npm run build` runs `tsc -b` and then Vite, so a type error fails the build.
+The generated `dist/` directory is git-ignored.
+
 The Supabase side has its own live checks. The checks that need user accounts
 create throwaway users with the admin key, run real requests, and delete what
 they created:
@@ -852,12 +944,14 @@ Responses include `request_id`, which also appears in the logs and in the
 | 5 | LangGraph workflow + state | ✅ done |
 | 6 | Tools & specialist agents + report generation | ✅ done |
 | 7 | Security, audit logging, rate limits, SQL safety | ✅ done |
-| 8 | React + TypeScript frontend | ⬜ |
+| 8 | React + TypeScript frontend | ✅ done |
 | 9 | Tests, Docker, deployment docs | ⬜ |
 
 ---
 
 ## Documentation
 
+- [`frontend/README.md`](frontend/README.md) — frontend setup, auth modes,
+  routes, source layout, checks and limitations.
 - [`docs/architecture.md`](docs/architecture.md) — components, request flow, and
   the reasoning behind each phase's choices.
