@@ -6,17 +6,18 @@ it retrieves internal documents (RAG), queries authorized business data safely
 reports — all coordinated by a LangGraph workflow behind a FastAPI backend and
 a React frontend.
 
-> **Status: Phase 9 of 9 in progress.** Phases 1–8 — foundation, LLM integration, RAG over
-> uploaded documents, Supabase persistence with Row Level Security, the
+> **Status: Phase 9 of 9 complete.** Phases 1–9 — foundation, LLM integration,
+> RAG over uploaded documents, Supabase persistence with Row Level Security, the
 > LangGraph supervisor, the specialist agents (SQL analytics, web research,
 > Markdown reports), security hardening (per-caller rate limits, an append-only
 > audit trail, prompt-injection defences, restricted analytics execution, and
-> production response headers), and the React + TypeScript frontend — work end
-> to end. Validation used a local Ollama `llama3.1:8b` and live Supabase Auth.
-> Web research needs `TAVILY_API_KEY`; without it the research route answers a
-> typed 503, and `check_web_search.py` exits 1 saying "not configured" rather
-> than pretending to pass. The CI gate is in place; container packaging and
-> deployment docs are next. See [Roadmap](#roadmap).
+> production response headers), the React + TypeScript frontend, and the CI +
+> container deployment path — work end to end. Validation used a local Ollama
+> `llama3.1:8b` and live Supabase Auth. Web research needs `TAVILY_API_KEY`;
+> without it the research route answers a typed 503, and `check_web_search.py`
+> exits 1 saying "not configured" rather than pretending to pass. The Compose
+> stack was built and smoke-tested locally; deployment guidance is in
+> [`docs/deployment.md`](docs/deployment.md). See [Roadmap](#roadmap).
 
 ---
 
@@ -124,6 +125,8 @@ Enterprize_AI/
 │   │   ├── check_web_search.py     # live Tavily search (exits 1 without a key)
 │   │   └── apply_migrations.py     # apply supabase/migrations over psycopg
 │   ├── tests/                      # 502 offline tests + 5 opt-in live tests
+│   ├── Dockerfile                  # non-root Python 3.12 runtime
+│   ├── .dockerignore
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   └── pyproject.toml
@@ -138,9 +141,16 @@ Enterprize_AI/
 │   │   ├── App.tsx                 # auth gate, lazy routes, error boundary
 │   │   └── styles.css              # responsive + print styles
 │   ├── .env.example
+│   ├── Dockerfile                  # Node build -> unprivileged nginx on :8080
+│   ├── nginx.conf                  # SPA fallback + same-origin /api proxy
+│   ├── .dockerignore
 │   ├── package.json
 │   └── README.md
-├── docs/architecture.md
+├── compose.yaml                    # production-like backend + frontend stack
+├── compose.ollama.yaml             # optional local host-Ollama override
+├── docs/
+│   ├── architecture.md
+│   └── deployment.md
 ├── supabase/migrations/            # 0001-0007: schema, RLS, search, demo data, security
 ├── data/                           # git-ignored: uploads + SQLite store
 ├── .env.example
@@ -155,10 +165,11 @@ Enterprize_AI/
 |---|---|
 | Python | 3.11+ (developed on 3.13) |
 | Node.js | 20+ (developed on 22.17) |
-| Docker | 29.9+ (needed from Phase 9) |
+| Docker | 29.9+ (optional for native development; required for containers) |
 
-Docker is not required for local development. Docker Desktop is installed and
-verified (29.9.2); the Dockerfile and Compose setup arrive in Phase 9.
+Docker is not required for local development, but the Phase 9 Compose stack is
+built and smoke-tested with Docker Desktop 29.9.2. The backend and frontend can
+still run natively as described below.
 
 ---
 
@@ -193,6 +204,43 @@ to use real Supabase Auth. Leave both blank to use the development `X-User-Id`
 stub while the backend also permits it. Only the public anon key belongs in the
 browser; never put `SUPABASE_SERVICE_ROLE_KEY` or any LLM key there. Full details
 are in [`frontend/README.md`](frontend/README.md).
+
+---
+
+## Run with Docker (Phase 9)
+
+The Compose stack runs the backend and an unprivileged nginx frontend on
+<http://localhost:8080>. nginx serves the SPA and proxies `/api` to the backend;
+the backend is not published to the host. The stack forces
+`ENVIRONMENT=production`, uses Supabase for auth, data, and document storage, and
+runs one backend worker.
+
+```powershell
+# From the repository root, after creating the root .env.
+docker compose config --quiet
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+Open <http://localhost:8080> and check <http://localhost:8080/api/health>.
+
+For the current local Ollama setup, use the host-Ollama override:
+
+```powershell
+docker compose -f compose.yaml -f compose.ollama.yaml up -d --build
+```
+
+Ollama must be reachable from the container (normally bound to
+`0.0.0.0:11434`, not only `127.0.0.1`). The default Compose stack does not run
+Ollama; for a hosted provider, set `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, and
+`OPENAI_MODEL` in the root `.env` and omit the override.
+
+The anon key is embedded in the frontend build; the service-role key and LLM keys
+stay backend-only. `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_DB_URL` are
+deliberately blanked inside the application container. Full production notes,
+TLS guidance, smoke tests, and troubleshooting are in
+[`docs/deployment.md`](docs/deployment.md).
 
 ---
 
@@ -420,9 +468,9 @@ npm run lint
 npm run build
 ```
 
-Routes are lazy-loaded; `dist/` contains static assets for Phase 9 hosting. See
-[`frontend/README.md`](frontend/README.md) for the full setup, auth, layout and
-design notes.
+Routes are lazy-loaded; `dist/` contains static assets that the frontend Docker
+image serves through nginx. See [`frontend/README.md`](frontend/README.md) for the
+full setup, auth, layout and design notes.
 
 ---
 
@@ -830,6 +878,8 @@ The generated `dist/` directory is git-ignored.
   `ruff format --check`, and `pytest -m "not integration"`.
 - **Frontend:** runs `npm ci`, `npm run lint`, `npm run typecheck`, and
   `npm run build`.
+- **Containers:** builds both Docker images without pushing them, so a broken
+  Dockerfile or missing build context fails the merge gate.
 
 The integration tests are excluded because they need live provider
 credentials; run them manually with `RUN_LIVE_LLM_TESTS=1` as shown above.
@@ -958,7 +1008,7 @@ Responses include `request_id`, which also appears in the logs and in the
 | 6 | Tools & specialist agents + report generation | ✅ done |
 | 7 | Security, audit logging, rate limits, SQL safety | ✅ done |
 | 8 | React + TypeScript frontend | ✅ done |
-| 9 | CI gate, Docker, deployment docs | 🚧 in progress |
+| 9 | CI gate, Docker, deployment docs | ✅ done |
 
 ---
 
@@ -968,3 +1018,5 @@ Responses include `request_id`, which also appears in the logs and in the
   routes, source layout, checks and limitations.
 - [`docs/architecture.md`](docs/architecture.md) — components, request flow, and
   the reasoning behind each phase's choices.
+- [`docs/deployment.md`](docs/deployment.md) — Compose, Supabase, Ollama override,
+  production hardening, smoke tests, and troubleshooting.

@@ -102,8 +102,9 @@ npm run preview     # serve dist/ on http://127.0.0.1:4173
 ```
 
 `npm run build` prints the bundle sizes. Routes are lazy-loaded so the initial
-payload does not include every screen; the generated files are static and can be
-served by any web server or CDN in Phase 9.
+payload does not include every screen. The Phase 9 frontend image serves the
+generated files through unprivileged nginx; the same files can also be served by
+any static host or CDN.
 
 ## Validation notes
 
@@ -178,4 +179,6 @@ src/
   which the UI displays with the backend's guidance.
 - The development `X-User-Id` identity is not authentication. Use Supabase Auth
   for anything shared or deployed.
-- Docker, container validation, and production hosting are Phase 9 work.
+- Docker packaging and production hosting are covered in the root
+  [`docs/deployment.md`](../docs/deployment.md); the UI itself is still not a
+  security boundary.

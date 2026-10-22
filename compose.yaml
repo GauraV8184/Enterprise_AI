@@ -1,0 +1,90 @@
+name: enterprise-ai
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: enterprise-ai-backend:local
+    env_file:
+      - .env
+    environment:
+      # The Compose stack is the production-like path. Supabase is required for
+      # auth, tenant data, and document storage; local SQLite is for bare-metal
+      # development only.
+      ENVIRONMENT: production
+      DEBUG: "false"
+      DATA_DIR: /app/data
+      DOCUMENT_STORE: supabase
+      FILE_STORAGE: supabase
+      AUTH_BACKEND: supabase
+      LOG_JSON: "true"
+      ALLOWED_HOSTS: ${COMPOSE_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      CORS_ORIGINS: ${COMPOSE_CORS_ORIGINS:-http://localhost:8080}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      # Admin scripts run from the host or a separate maintenance container. The
+      # request-serving backend never needs these privileged values.
+      SUPABASE_SERVICE_ROLE_KEY: ""
+      SUPABASE_DB_URL: ""
+    expose:
+      - "8000"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+        # The anon key is public by design and protected by RLS. Never pass the
+        # service-role key into a Vite build argument.
+        VITE_SUPABASE_URL: ${SUPABASE_URL:-}
+        VITE_SUPABASE_ANON: ${SUPABASE_ANON_KEY:-}
+        VITE_DEV_USER_ID: ${VITE_DEV_USER_ID:-dev-user}
+        VITE_MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+    image: enterprise-ai-frontend:local
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    init: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

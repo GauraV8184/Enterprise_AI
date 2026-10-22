@@ -1,7 +1,7 @@
 # Architecture — Enterprise AI Intelligence Platform
 
 This note explains how the system is put together and why, focusing on what
-exists after **Phase 8**. It is written to be read by someone learning the
+exists after **Phase 9**. It is written to be read by someone learning the
 stack, so it favors plain language over jargon.
 
 ## 1. High-level shape
@@ -1097,15 +1097,15 @@ navigation.
   model; the frontend correctly renders the route it was given.
 - Web research still needs `TAVILY_API_KEY`; a missing key is shown as the typed
   `503`, not as an empty answer.
-- Docker, container validation, a production web server and CDN cache headers
-  are Phase 9 work. The Phase 8 deliverable is the verified static `dist/` build
-  and the development proxy.
+- The UI is only the presentation layer. Docker packaging, the production nginx
+  server, and cache headers are covered in Phase 9; they do not change the
+  frontend's trust boundary.
 
 ## Phase 9: delivery
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` is the merge gate. It runs two independent jobs on
+`.github/workflows/ci.yml` is the merge gate. It runs three independent jobs on
 pushes to `main`, pull requests, and manual dispatches:
 
 - **Backend:** Python 3.12, development dependencies from
@@ -1113,12 +1113,68 @@ pushes to `main`, pull requests, and manual dispatches:
   `pytest -m "not integration"`.
 - **Frontend:** Node.js 22, `npm ci`, ESLint, the TypeScript project build, and
   the Vite production build.
+- **Containers:** builds the backend and frontend images without pushing them.
+  A broken Dockerfile or missing build context fails the gate.
 
 The gate deliberately excludes the `integration` marker. Those tests need a
 real LLM, embeddings, and network access, and a CI run without credentials must
 not pretend they passed. They remain opt-in through `RUN_LIVE_LLM_TESTS=1`.
-Neither job needs a repository secret: the default suite uses fake chat,
-embedding, and search clients and a temporary SQLite store.
+No job needs a repository secret: the default suite uses fake chat, embedding,
+and search clients and a temporary SQLite store.
 
-Container packaging, production configuration, and the deployment runbook are
-the remaining Phase 9 deliverables.
+### Container design
+
+The backend image is `python:3.12-slim`. It installs the runtime requirements
+and `libgomp1`, creates an unprivileged `app` user (UID 10001), sets
+`DATA_DIR=/app/data`, and starts one uvicorn worker with proxy headers enabled.
+The container has a `/health` health check; Compose also checks it before
+starting nginx. One worker is deliberate: the rate limiter and several caches
+are process-local, so scaling out requires a shared store such as Redis.
+
+The frontend image is a two-stage build: Node 22 produces the Vite bundle,
+then `nginxinc/nginx-unprivileged` (UID 101) serves it on port 8080. The nginx
+configuration:
+
+- falls back to `index.html` for client-side routes;
+- proxies `/api/` to `backend:8000` on the Compose network;
+- uses a 360-second proxy read/send timeout for long report requests;
+- applies the same `nosniff`, `DENY`, `no-referrer`, and permissions headers as
+  the API, without duplicating the upstream values;
+- caches hashed `/assets/` files for a year and marks the SPA shell `no-cache`.
+
+The `compose.yaml` stack is the production-like path. It forces
+`ENVIRONMENT=production`, selects Supabase for auth, documents, and files, and
+runs the backend as a single worker. The backend port is not published; only
+nginx's port 8080 is exposed. Compose enables `no-new-privileges`, bounded
+json-file logs, and graceful shutdown. `SUPABASE_SERVICE_ROLE_KEY` and
+`SUPABASE_DB_URL` are explicitly blanked inside the application container
+because only the host-side admin scripts need them. The anon key is the only
+Supabase credential passed into the frontend build.
+
+`compose.ollama.yaml` is an optional local override that points the backend at
+a host Ollama server via `host.docker.internal:11434`. Ollama is not part of the
+default stack and must be bound to an address the container can reach.
+
+### Production configuration and docs
+
+The operator keeps the real values in the git-ignored root `.env` (or injects
+them from a secret manager). Production needs a real hostname in
+`COMPOSE_ALLOWED_HOSTS`, a matching `COMPOSE_CORS_ORIGINS`, and TLS at the edge;
+only the frontend port should be public. `/api/docs` and `/api/openapi.json`
+are disabled in production, while `/docs` is served by the SPA fallback.
+
+The complete runbook, including the local Ollama override, smoke tests, and a
+troubleshooting table, is in [`deployment.md`](deployment.md).
+
+### Validation performed
+
+The CI gate covers the backend, frontend, and container-image jobs. Locally,
+both images built, both services reached `healthy`, `/api/health`
+returned `environment: production`, `/api/docs` returned 404, static assets had
+the expected cache headers, the container users were UID 10001 and UID 101, the
+frontend rendered the Supabase sign-in screen with no console errors, and the
+backend container reached host Ollama and completed a short chat request.
+The full user-facing flow (Supabase sign-in, upload, grounded answer, report)
+was already verified in the Phase 8 UI and live Supabase checks; the container
+smoke test verifies the packaging and proxy path, not a second UI regression
+suite.

@@ -1,0 +1,17 @@
+# Optional local-development override: use an Ollama server running on the host
+# instead of a hosted OpenAI-compatible provider.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.ollama.yaml up -d --build
+#
+# On Docker Desktop, host.docker.internal points at the host. On Linux the
+# extra_hosts mapping below provides the same name. Ollama must be listening on
+# an address reachable from the container (normally 0.0.0.0:11434), not only
+# 127.0.0.1.
+services:
+  backend:
+    environment:
+      OPENAI_BASE_URL: http://host.docker.internal:11434/v1
+      EMBEDDING_BASE_URL: http://host.docker.internal:11434/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
