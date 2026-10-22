@@ -32,6 +32,7 @@ already decides which rows exist.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Iterator, Sequence
@@ -46,8 +47,16 @@ import numpy as np
 from app.core.logging import get_logger, safe_extra
 from app.core.vectors import cosine_similarity_matrix
 from app.database.demo_data import DEMO_PRODUCTS, demo_sales_rows
-from app.database.errors import AnalyticsQueryFailedError, EmbeddingDimensionMismatchError
-from app.database.sql_guard import MAX_ROWS_HARD_LIMIT, validate_readonly_sql
+from app.database.errors import (
+    AnalyticsQueryFailedError,
+    AnalyticsQueryRejectedError,
+    EmbeddingDimensionMismatchError,
+)
+from app.database.sql_guard import (
+    ALLOWED_TABLES,
+    MAX_ROWS_HARD_LIMIT,
+    validate_readonly_sql,
+)
 
 logger = get_logger(__name__)
 
@@ -109,7 +118,87 @@ CREATE TABLE IF NOT EXISTS demo_sales_orders (
 
 CREATE INDEX IF NOT EXISTS idx_demo_sales_orders_month
     ON demo_sales_orders (order_date);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id            TEXT PRIMARY KEY,
+    owner_id      TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    resource_type TEXT,
+    resource_id   TEXT,
+    request_id    TEXT,
+    detail        TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_owner
+    ON audit_events (owner_id, created_at DESC);
 """
+
+
+_DENIED_SQLITE_ACTIONS = frozenset(
+    getattr(sqlite3, name, -1)
+    for name in (
+        "SQLITE_INSERT",
+        "SQLITE_UPDATE",
+        "SQLITE_DELETE",
+        "SQLITE_CREATE_INDEX",
+        "SQLITE_CREATE_TABLE",
+        "SQLITE_CREATE_TEMP_INDEX",
+        "SQLITE_CREATE_TEMP_TABLE",
+        "SQLITE_CREATE_TEMP_TRIGGER",
+        "SQLITE_CREATE_TEMP_VIEW",
+        "SQLITE_CREATE_TRIGGER",
+        "SQLITE_CREATE_VIEW",
+        "SQLITE_DROP_INDEX",
+        "SQLITE_DROP_TABLE",
+        "SQLITE_DROP_TEMP_INDEX",
+        "SQLITE_DROP_TEMP_TABLE",
+        "SQLITE_DROP_TEMP_TRIGGER",
+        "SQLITE_DROP_TEMP_VIEW",
+        "SQLITE_DROP_TRIGGER",
+        "SQLITE_DROP_VIEW",
+        "SQLITE_ALTER_TABLE",
+        "SQLITE_REINDEX",
+        "SQLITE_ANALYZE",
+        "SQLITE_ATTACH",
+        "SQLITE_DETACH",
+        "SQLITE_PRAGMA",
+        "SQLITE_TRANSACTION",
+        "SQLITE_SAVEPOINT",
+    )
+)
+
+
+def _demo_only_authorizer(denials: list[str]):
+    """Build a SQLite authorizer that permits reads of the demo tables only.
+
+    The authorizer sees every table by its *real* name, even when the query
+    aliases it or hides it behind a CTE or subquery, so - unlike a regex over
+    the SQL text - it cannot be evaded by rewriting the statement. SQLite calls
+    it while preparing the statement, before any row is read.
+
+    ``denials`` collects what was refused, so the caller can raise a repairable
+    rejection that names the table instead of surfacing "not authorized".
+    """
+
+    def authorizer(
+        action: int,
+        arg1: str | None,
+        _arg2: str | None,
+        _dbname: str | None,
+        _trigger: str | None,
+    ) -> int:
+        if action in _DENIED_SQLITE_ACTIONS:
+            denials.append("write")
+            return sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_READ:
+            table = (arg1 or "").lower()
+            if table not in ALLOWED_TABLES:
+                denials.append(table or "an unknown table")
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    return authorizer
 
 
 @dataclass(frozen=True)
@@ -257,6 +346,17 @@ class DocumentStore(Protocol):
     ) -> ChunkSearchResult: ...
 
     def run_analytics_query(self, *, sql: str, max_rows: int = 100) -> list[dict[str, Any]]: ...
+
+    def record_audit_event(
+        self,
+        *,
+        owner_id: str,
+        action: str,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        request_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None: ...
 
 
 class DocumentRepository:
@@ -642,19 +742,71 @@ class DocumentRepository:
 
         The statement is validated here again, then wrapped in an outer LIMIT so
         it cannot return more rows than the caller asked for - the same
-        guarantee Postgres provides inside ``run_demo_query``. SQLite has no
-        statement timeout, so on this backend the row cap is the whole
-        resource bound; that is one more reason it stays the development store.
+        guarantee Postgres provides inside ``run_demo_query``. An authorizer on
+        the connection refuses any table that is not part of the demo dataset,
+        which is the SQLite equivalent of the restricted role and plan check on
+        Postgres. SQLite has no statement timeout, so on this backend the row cap
+        is the whole resource bound; that is one more reason it stays the
+        development store.
         """
         statement = validate_readonly_sql(sql)
         limit = max(1, min(int(max_rows), MAX_ROWS_HARD_LIMIT))
         wrapped = f"SELECT * FROM ({statement}) AS demo_query LIMIT {limit}"
+        denials: list[str] = []
 
         try:
             with self._connect() as connection:
-                rows = connection.execute(wrapped).fetchall()
+                connection.set_authorizer(_demo_only_authorizer(denials))
+                try:
+                    rows = connection.execute(wrapped).fetchall()
+                finally:
+                    connection.set_authorizer(None)
         except sqlite3.Error as exc:
+            if denials and denials[0] == "write":
+                raise AnalyticsQueryRejectedError(
+                    "Only read-only access to the demo dataset is allowed."
+                ) from exc
+            if denials:
+                raise AnalyticsQueryRejectedError(
+                    f"Table {denials[0]!r} is not part of the demo dataset. "
+                    "Query only demo_products and demo_sales_orders."
+                ) from exc
             logger.warning("analytics_query_failed", extra=safe_extra(error=str(exc)[:200]))
             raise AnalyticsQueryFailedError(repair_hint=str(exc)) from exc
 
         return [dict(row) for row in rows]
+
+    def record_audit_event(
+        self,
+        *,
+        owner_id: str,
+        action: str,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        request_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one audit event for ``owner_id``.
+
+        Append-only at the application level: the store offers no update or
+        delete, and the Postgres table has no such grant for user roles either.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO audit_events
+                    (id, owner_id, action, resource_type, resource_id,
+                     request_id, detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    owner_id,
+                    action,
+                    resource_type,
+                    resource_id,
+                    request_id,
+                    json.dumps(detail or {}, ensure_ascii=False, sort_keys=True),
+                    _utc_now(),
+                ),
+            )

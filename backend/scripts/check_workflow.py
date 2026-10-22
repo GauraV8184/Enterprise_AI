@@ -58,9 +58,7 @@ QUESTION = "How many days of paid annual leave does a full-time employee accrue?
 
 DATA_QUESTION = "How many sales orders are in the demo dataset?"
 
-REPORT_TOPIC = (
-    "Write a report on the employee leave policy and the demo sales revenue by region."
-)
+REPORT_TOPIC = "Write a report on the employee leave policy and the demo sales revenue by region."
 
 RESEARCH_QUESTION = "What is the current UK statutory annual leave entitlement?"
 
@@ -220,7 +218,9 @@ async def check_documents(
     checks.append(("the question is routed to documents", state["route"] == "documents"))
     checks.append(("the answer is grounded", state["grounded"] is True))
     checks.append(("at least one source is attached", len(state.get("sources", [])) >= 1))
-    checks.append(("the answer contains the figure", "twenty" in answer_text or "20" in answer_text))
+    checks.append(
+        ("the answer contains the figure", "twenty" in answer_text or "20" in answer_text)
+    )
     checks.append(("the answer cites its source", "[1]" in state["answer"]))
 
 
@@ -256,7 +256,12 @@ async def check_analytics(
     checks.append(("the question is routed to analytics", state["route"] == "analytics"))
     checks.append(("the query returned rows", bool(analytics and analytics.rows)))
     checks.append(("the answer is grounded", state["grounded"] is True))
-    checks.append(("the SQL is a read-only SELECT", bool(analytics and analytics.sql.lower().lstrip().startswith(("select", "with")))))
+    checks.append(
+        (
+            "the SQL is a read-only SELECT",
+            bool(analytics and analytics.sql.lower().lstrip().startswith(("select", "with"))),
+        )
+    )
 
 
 async def check_report(

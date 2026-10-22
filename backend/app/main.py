@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.error_handlers import register_error_handlers
 from app.api.router import api_router
@@ -26,6 +27,7 @@ from app.core.logging import get_logger, request_id_ctx, safe_extra, setup_loggi
 from app.database.repositories import DocumentRepository
 from app.llm.errors import LlmNotConfiguredError
 from app.llm.factory import build_chat_model, build_embeddings
+from app.security.rate_limit import RateLimiter
 from app.security.supabase_auth import SupabaseTokenVerifier
 from app.storage.local import LocalFileStore
 from app.tools.web_search import build_web_search
@@ -58,6 +60,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if not settings.is_production else None,
     )
     app.state.settings = settings
+    app.state.rate_limiter = RateLimiter(
+        enabled=settings.rate_limit_enabled,
+        standard_per_minute=settings.rate_limit_standard_per_minute,
+        model_per_minute=settings.rate_limit_model_per_minute,
+    )
+    if settings.rate_limit_enabled:
+        logger.info(
+            "rate_limiting_ready",
+            extra=safe_extra(
+                standard_per_minute=settings.rate_limit_standard_per_minute,
+                model_per_minute=settings.rate_limit_model_per_minute,
+                scope="per identity, per process",
+            ),
+        )
+    else:
+        log = logger.warning if settings.is_production else logger.info
+        log(
+            "rate_limiting_disabled",
+            extra=safe_extra(hint="Set RATE_LIMIT_ENABLED=true to enforce request budgets"),
+        )
+
+    if settings.is_production and "*" in settings.cors_origins:
+        logger.warning(
+            "cors_wildcard_in_production",
+            extra=safe_extra(
+                hint="Set CORS_ORIGINS to the front-end origins that should be allowed"
+            ),
+        )
 
     app.add_middleware(
         CORSMiddleware,
@@ -68,7 +98,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expose_headers=[REQUEST_ID_HEADER],
     )
 
+    if settings.is_production:
+        if "*" in settings.allowed_hosts:
+            logger.warning(
+                "trusted_hosts_wildcard",
+                extra=safe_extra(hint="Set ALLOWED_HOSTS to the domains this API is served from"),
+            )
+        # Added after CORS so it wraps it: a request with a forged Host header is
+        # rejected before any handler or CORS logic sees it.
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+
     _register_request_context(app)
+    _register_security_headers(app)
     register_error_handlers(app)
 
     app.include_router(api_router, prefix=settings.api_prefix)
@@ -227,6 +268,31 @@ def _register_request_context(app: FastAPI) -> None:
             raise
         finally:
             request_id_ctx.reset(token)
+
+
+def _register_security_headers(app: FastAPI) -> None:
+    """Attach the headers every API response should carry.
+
+    The API returns JSON, never HTML, so these are cheap and need no nonce-based
+    policy. ``no-store`` matters: a document answer or a report is tenant data
+    and must not sit in a shared browser or proxy cache.
+
+    HSTS is sent only in production. Sending it in development would pin
+    ``localhost`` to HTTPS in the developer's browser and break the next run.
+    """
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next: Callable[[Request], Awaitable[object]]):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Cache-Control", "no-store")
+        if request.app.state.settings.is_production:
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
+        return response
 
 
 app = create_app()

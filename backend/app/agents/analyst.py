@@ -95,14 +95,10 @@ async def generate_and_run_query(
             immediately, because a second model call cannot fix it.
     """
     feedback: str | None = None
-    last_error: AppError = AnalyticsQueryRejectedError(
-        "No query attempt was made."
-    )
+    last_error: AppError = AnalyticsQueryRejectedError("No query attempt was made.")
 
     for attempt in range(1, MAX_QUERY_ATTEMPTS + 1):
-        query = await generate_query(
-            model, question=question, max_rows=max_rows, feedback=feedback
-        )
+        query = await generate_query(model, question=question, max_rows=max_rows, feedback=feedback)
         try:
             result = await run_in_threadpool(
                 run_analytics_query, store, sql=query.sql, max_rows=max_rows

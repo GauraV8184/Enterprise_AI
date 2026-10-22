@@ -8,7 +8,8 @@ report, so a reader can verify it instead of trusting it.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from starlette.concurrency import run_in_threadpool
 
 from app.agents.report import generate_report
 from app.api.deps import (
@@ -23,7 +24,9 @@ from app.schemas.chat import TokenUsage
 from app.schemas.documents import SourceCitation
 from app.schemas.evidence import AnalyticsEvidence, WebSource
 from app.schemas.reports import ReportRequest, ReportResponse
+from app.security.audit import record_event
 from app.security.identity import CurrentUserDep
+from app.security.rate_limit import model_rate_limit
 
 logger = get_logger(__name__)
 
@@ -34,6 +37,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
     "",
     response_model=ReportResponse,
     summary="Generate an evidence-backed Markdown report",
+    dependencies=[Depends(model_rate_limit)],
 )
 async def create_report(
     payload: ReportRequest,
@@ -78,6 +82,20 @@ async def create_report(
             web_sources=len(evidence.web),
             analytics_rows=analytics.row_count if analytics else 0,
         ),
+    )
+    await run_in_threadpool(
+        record_event,
+        repository,
+        user=user,
+        action="report.generated",
+        resource_type="report",
+        detail={
+            "grounded": outcome.grounded,
+            "sources_requested": evidence.requested,
+            "documents": len(evidence.documents),
+            "web_sources": len(evidence.web),
+            "analytics_rows": analytics.row_count if analytics else 0,
+        },
     )
 
     usage = outcome.usage

@@ -199,8 +199,21 @@ class PostgrestClient:
         if path.startswith(_ANALYTICS_RPC_PATH):
             if pg_code == "P0001":
                 raise AnalyticsQueryRejectedError(message)
-            if response.status_code == 400 or pg_code == _STATEMENT_TIMEOUT_SQLSTATE:
-                raise AnalyticsQueryFailedError(repair_hint=message)
+            # PostgREST maps SQLSTATEs to different HTTP statuses - a missing
+            # table becomes 404, a timeout 500 - so the database's own code is
+            # what decides. Any non-PGRST code belongs to the query and is
+            # repairable feedback. A 400 that reaches this point is also query
+            # feedback: this client, not the caller, builds the body.
+            if pg_code == _STATEMENT_TIMEOUT_SQLSTATE or (
+                pg_code and not pg_code.startswith("PGRST")
+            ):
+                raise AnalyticsQueryFailedError(
+                    repair_hint=message or f"HTTP {response.status_code}"
+                )
+            if response.status_code == 400:
+                raise AnalyticsQueryFailedError(
+                    repair_hint=message or "The analytics query was refused."
+                )
         if any(pattern.search(message) for pattern in _DIMENSION_PATTERNS):
             raise VectorDimensionError(message)
         if response.status_code >= 500:

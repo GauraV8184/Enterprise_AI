@@ -1,10 +1,11 @@
-# Supabase setup (Phases 4–6)
+# Supabase setup (Phases 4–7)
 
 Everything the application needs from Supabase lives in this folder: the database
 schema, the vector index, the Row Level Security policies, the private storage
-bucket for uploaded files, and the demo dataset behind the SQL analytics tool.
+bucket for uploaded files, the demo dataset behind the SQL analytics tool, and
+the append-only audit trail.
 
-Five files, in order:
+Seven files, in order:
 
 | File | Creates |
 | --- | --- |
@@ -13,6 +14,8 @@ Five files, in order:
 | `migrations/0003_tighten_privileges.sql` | revokes privileges that bypass RLS, drops a redundant index |
 | `migrations/0004_search_ready_documents.sql` | replaces `match_document_chunks` so only `ready` documents rank, with a 0.1 similarity floor |
 | `migrations/0005_demo_analytics.sql` | `demo_products`, `demo_sales_orders` (384 seeded rows) and the read-only `run_demo_query()` function |
+| `migrations/0006_restrict_analytics_tables.sql` | the `demo_reader` role, its two-table grants and policies, and the plan-checked `SECURITY DEFINER` replacement for `run_demo_query()` |
+| `migrations/0007_audit_events.sql` | `audit_events` (append-only, RLS read-own) and the `record_audit_event()` RPC |
 
 0003 exists because 0001 was wrong in a way that only the live catalog revealed:
 Supabase grants `ALL` on new `public` tables to `authenticated` by default, and
@@ -25,13 +28,32 @@ audits this (and the other RLS invariants) on every run.
 
 0005 supports the Phase 6 SQL analytics tool. It creates two **clearly labelled
 demonstration tables** - not business records - and a function that executes one
-caller-supplied `SELECT` against them. The function is `SECURITY INVOKER` (so
-RLS applies inside it), `STABLE` (so Postgres itself refuses writes inside it),
-caps the result at 200 rows, cancels after 5 seconds, and repeats the
-application's keyword rules so the database refuses what the Python guard
-refuses. An `authenticated` caller may read the demo rows; nobody may write them;
-`anon` cannot execute the function at all. Replace the tables and this function
-before pointing the route at real data.
+caller-supplied `SELECT` against them. The function is `STABLE` (so Postgres
+itself refuses writes inside it), caps the result at 200 rows, cancels after 5
+seconds, and repeats the application's keyword rules so the database refuses what
+the Python guard refuses. An `authenticated` caller may read the demo rows;
+nobody may write them; `anon` cannot execute the function at all. Replace the
+tables and this function before pointing the route at real data.
+
+0006 is the Phase 7 correction to 0005. `SECURITY INVOKER` kept the function
+inside the caller's privileges, but every caller can read their own `documents`
+and `chunks`, so a generated `select * from documents` would have passed the
+string guard. 0006 changes the function to `SECURITY DEFINER`, owned by a new
+`demo_reader` role (`NOLOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`) whose only table
+grants are `SELECT` on the two demo tables. Before executing, a small `VOLATILE`
+helper (`explain_demo_query()`, owned by the same role and executable only by
+its owner) runs `EXPLAIN (FORMAT JSON, VERBOSE)`, and `run_demo_query()` refuses
+any relation that is not `public.demo_products` or `public.demo_sales_orders`, so
+aliases, CTEs and subqueries cannot hide another table. The role also gets read
+policies for the two tables. `anon` still cannot execute the function.
+
+0007 adds the audit trail. `audit_events` has one write path,
+`record_audit_event()`, which derives the actor from `auth.uid()` rather than
+accepting it as an argument. `authenticated` may `SELECT` only its own rows
+(policy) and may not `INSERT`, `UPDATE` or `DELETE` directly. The detail is
+metadata only and is capped at 8 KiB. There is no foreign key to `auth.users`:
+deleting a user must not erase the record of what they did. The service role
+keeps `DELETE` for a future retention job.
 
 All files are **idempotent** — re-running them is safe, so a failure halfway
 through can be fixed by simply running the file again.
@@ -74,8 +96,8 @@ applied so later runs skip it.
 ### Option B — Supabase SQL editor
 
 No password needs to leave the dashboard. Open **SQL Editor**, paste the whole of
-`0001_documents_and_chunks.sql`, press **Run**, then do the same with the four
-later files in order (`0002` … `0005`).
+`0001_documents_and_chunks.sql`, press **Run**, then do the same with the six
+later files in order (`0002` … `0007`).
 
 The trade-off is that there is no record of which files have been applied, so
 `scripts/apply_migrations.py --status` will report nothing. Re-running the files
@@ -102,6 +124,10 @@ demo_products        (demo data; read by any authenticated caller)
     │  id, name, category, unit_price
     │
     └──< demo_sales_orders ── order_date, region, product_id, quantity, revenue
+
+audit_events         (append-only; each caller reads only their own rows)
+       id, actor_id, action, resource_type, resource_id, request_id, detail,
+       created_at
 ```
 
 `documents` and `chunks` are a faithful mirror of the SQLite development store
@@ -161,12 +187,31 @@ display name in `documents.filename` is not changed.
 
 These two tables are **demonstration data**, so every signed-in caller
 deliberately reads the same rows; there is no owner column to scope by. There is
-no write policy on either table, and `anon` has no grants at all. The
-`run_demo_query()` function that executes generated SQL is `SECURITY INVOKER`
-(it cannot read what RLS would hide) and `STABLE` (Postgres refuses
-data-modifying statements inside a non-volatile function), caps rows at 200,
-cancels after 5 seconds, and is executable by `authenticated` and
-`service_role` only.
+no write policy on either table, and `anon` has no grants at all.
+
+### Policies and roles created by 0006
+
+| Object | Rule |
+| --- | --- |
+| `demo_products` / `demo_sales_orders` | `SELECT` for `demo_reader`, `USING (true)` |
+| `demo_reader` | `NOLOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`; `SELECT` on the two demo tables only; `USAGE` on `public` |
+| `run_demo_query()` | `SECURITY DEFINER`, owner `demo_reader`, `STABLE`; `EXPLAIN` plan must contain only `public.demo_products` and `public.demo_sales_orders`; 200-row cap; 5s timeout |
+
+The function is executable by `authenticated` and `service_role`, not `anon`.
+The plan check is the part that makes the grant list meaningful: even if the
+function were later changed to accept a different statement, the role behind it
+still cannot read `documents`, `chunks` or any other schema.
+
+### Policies created by 0007
+
+| Object | Rule |
+| --- | --- |
+| `audit_events` | `SELECT` for `authenticated` where `actor_id = auth.uid()` |
+| `audit_events` | no `INSERT` / `UPDATE` / `DELETE` policy; `authenticated` has no such grants |
+| `record_audit_event()` | `SECURITY DEFINER`; actor from `auth.uid()`; `EXECUTE` for `authenticated` and `service_role` only |
+
+`service_role` keeps `DELETE` on `audit_events` so a retention job can prune old
+events. The application never uses that path.
 
 ---
 
@@ -192,13 +237,16 @@ downloads embeddings to compare them.
 | `python scripts/check_rls.py` | two real users cannot reach each other's rows through the REST API directly |
 | `python scripts/check_store.py` | the application's own store works end to end and stays tenant-scoped |
 | `python scripts/check_storage.py` | the bucket accepts the caller's own token and refuses a second user's read, write and delete |
-| `python scripts/check_analytics.py` | the demo dataset matches `app/database/demo_data.py` exactly, the row cap and 5s timeout hold, and `run_demo_query()` refuses writes, second statements and blocked keywords even when the application's guard is bypassed |
+| `python scripts/check_analytics.py` | the demo dataset matches `app/database/demo_data.py` exactly, the row cap and 5s timeout hold, `run_demo_query()` refuses writes, second statements and blocked keywords even when the application's guard is bypassed, and generated SQL cannot read `documents`, `chunks` or a system catalog |
+| `python scripts/check_audit.py` | the audit actor comes from the token, one user cannot read another's events, and direct INSERT/UPDATE/DELETE are refused |
 
-All five create throwaway users through the admin API. They delete the users, the
-rows cascade, and the storage objects are removed explicitly: `storage.objects`
-has no foreign key to `auth.users`, so deleting a user does **not** delete their
-files. `check_rls.py` and `check_storage.py` list the owner's prefix afterwards
-to prove the bucket is empty. `check_web_search.py` (Tavily) is the sixth check;
+The five checks that need user accounts create throwaway users through the
+admin API. They delete the users, the rows cascade, and the storage objects are
+removed explicitly: `storage.objects` has no foreign key to `auth.users`, so
+deleting a user does **not** delete their files. `check_audit.py` deletes its
+audit rows with the service role first, because events deliberately outlive the
+user. `check_rls.py` and `check_storage.py` list the owner's prefix afterwards to
+prove the bucket is empty. `check_web_search.py` (Tavily) is the seventh check;
 it exits 1 saying "not configured" when no key is set, because a check that
 "passed" without ever searching would be a lie.
 

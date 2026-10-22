@@ -9,7 +9,8 @@ see which capability ran and whether grounding applies.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import (
     ChatModelDep,
@@ -24,7 +25,9 @@ from app.schemas.chat import TokenUsage
 from app.schemas.documents import SourceCitation
 from app.schemas.evidence import AnalyticsEvidence, WebSource
 from app.schemas.workflow import WorkflowRequest, WorkflowResponse
+from app.security.audit import record_event
 from app.security.identity import CurrentUserDep
+from app.security.rate_limit import model_rate_limit
 
 logger = get_logger(__name__)
 
@@ -35,6 +38,7 @@ router = APIRouter(prefix="/workflow", tags=["workflow"])
     "/run",
     response_model=WorkflowResponse,
     summary="Classify a request and answer it with the right capability",
+    dependencies=[Depends(model_rate_limit)],
 )
 async def run_supervisor(
     payload: WorkflowRequest,
@@ -80,6 +84,21 @@ async def run_supervisor(
             analytics_rows=analytics.row_count if analytics else 0,
             searched_chunks=state.get("searched_chunks", 0),
         ),
+    )
+    await run_in_threadpool(
+        record_event,
+        repository,
+        user=user,
+        action="workflow.ran",
+        detail={
+            "route": state["route"],
+            "intent": state["intent"].intent,
+            "grounded": state.get("grounded"),
+            "sources": len(sources),
+            "web_sources": len(web_sources),
+            "analytics_rows": analytics.row_count if analytics else 0,
+            "searched_chunks": state.get("searched_chunks", 0),
+        },
     )
 
     usage = state.get("usage")

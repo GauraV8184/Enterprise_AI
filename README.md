@@ -6,15 +6,17 @@ it retrieves internal documents (RAG), queries authorized business data safely
 reports — all coordinated by a LangGraph workflow behind a FastAPI backend and
 a React frontend.
 
-> **Status: Phase 6 of 9 complete, verified against live providers.** Phases 1–6
+> **Status: Phase 7 of 9 complete, verified against live providers.** Phases 1–7
 > — foundation, LLM integration, RAG over uploaded documents, Supabase
-> persistence with Row Level Security, the LangGraph supervisor, and the
-> specialist agents (SQL analytics, web research, Markdown reports) — work end
-> to end (validated with a local Ollama `llama3.1:8b` and the live Supabase
-> project). Web research needs `TAVILY_API_KEY`; without it the research route
-> answers a typed 503, and `check_web_search.py` exits 1 saying "not
-> configured" rather than pretending to pass. Later phases add security
-> hardening, the React UI, and deployment. See [Roadmap](#roadmap).
+> persistence with Row Level Security, the LangGraph supervisor, the specialist
+> agents (SQL analytics, web research, Markdown reports), and security hardening
+> (per-caller rate limits, an append-only audit trail, prompt-injection
+> defences, restricted analytics execution, and production response headers) —
+> work end to end. Validation used a local Ollama `llama3.1:8b` and the live
+> Supabase project. Web research needs `TAVILY_API_KEY`; without it the research
+> route answers a typed 503, and `check_web_search.py` exits 1 saying "not
+> configured" rather than pretending to pass. Later phases add the React UI and
+> deployment. See [Roadmap](#roadmap).
 
 ---
 
@@ -32,7 +34,7 @@ FastAPI backend  (this repo: backend/)
    |-- agents/   analyst, research, report writers   <- Phase 6 ✅
    |-- rag/      loaders, chunking, retrieval        <- Phase 3 ✅
    |-- tools/    Tavily search + SQL analytics       <- Phase 6 ✅
-   |-- security/ guards, SQL validation, audit       <- Phase 7
+   |-- security/ guards, SQL validation, audit       <- Phase 7 ✅
    `-- database/ repositories                        <- Phase 4 ✅
         |
         v
@@ -88,6 +90,9 @@ Enterprize_AI/
 │   │   │   ├── file_validation.py  # extension, size and magic-byte checks
 │   │   │   ├── identity.py         # who is asking (Supabase JWT or dev stub)
 │   │   │   ├── supabase_auth.py    # JWT verification against the project JWKS
+│   │   │   ├── rate_limit.py       # per-identity sliding-window budgets
+│   │   │   ├── audit.py            # best-effort, append-only audit writes
+│   │   │   ├── prompt_injection.py # detector + delimiter neutralisation
 │   │   │   └── errors.py           # auth error types
 │   │   ├── api/
 │   │   │   ├── deps.py             # shared dependencies
@@ -114,14 +119,15 @@ Enterprize_AI/
 │   │   ├── check_storage.py        # bucket policies, live
 │   │   ├── check_workflow.py       # every supervisor route, live
 │   │   ├── check_analytics.py      # demo dataset + SQL function, live
+│   │   ├── check_audit.py          # audit actor, isolation, append-only, live
 │   │   ├── check_web_search.py     # live Tavily search (exits 1 without a key)
 │   │   └── apply_migrations.py     # apply supabase/migrations over psycopg
-│   ├── tests/                      # 470 offline tests + 5 opt-in live tests
+│   ├── tests/                      # 502 offline tests + 5 opt-in live tests
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   └── pyproject.toml
 ├── docs/architecture.md
-├── supabase/migrations/            # 0001-0005: schema, RLS, search, demo data
+├── supabase/migrations/            # 0001-0007: schema, RLS, search, demo data, security
 ├── data/                           # git-ignored: uploads + SQLite store
 ├── .env.example
 └── README.md
@@ -546,17 +552,26 @@ Executing generated SQL is a security-shaped problem, so it is bounded in three
 independent layers, and each one fails closed:
 
 1. **A Python pre-flight guard** (`app/database/sql_guard.py`): exactly one
-   statement, `SELECT`/`WITH` only, a keyword blocklist, and a length limit. Its
-   refusals are safe to show, and the analyst feeds one back to the model as a
-   single repair attempt.
-2. **The database function** (`run_demo_query`): `SECURITY INVOKER` and
-   `STABLE` — Postgres itself refuses data-modifying statements inside a
-   non-volatile function — with its own copy of the keyword rules, an outer
+   statement, `SELECT`/`WITH` only, a keyword blocklist, a length limit, and a
+   table allowlist (`ALLOWED_TABLES`). Its refusals are safe to show, and the
+   analyst feeds one back to the model as a single repair attempt. The SQLite
+   store enforces the same allowlist independently with a connection authorizer,
+   because SQLite has no roles or RLS.
+2. **A locked-down database function** (`run_demo_query`): `SECURITY DEFINER`,
+   owned by the non-login `demo_reader` role (migration `0006`). Before running,
+   it asks a small `VOLATILE` planning helper (`explain_demo_query`, owned by the
+   same role — `EXPLAIN` is forbidden inside a `STABLE` function) and walks the
+   plan: every relation must be `public.demo_products` or
+   `public.demo_sales_orders`, and any other table or schema is refused. The
+   function is also `STABLE` — Postgres refuses data-modifying statements inside
+   a non-volatile function — with its own copy of the keyword rules, an outer
    `LIMIT` capped at 200 rows (`ANALYTICS_MAX_ROWS` defaults to 100), and
-   `statement_timeout = 5s` so a runaway query is cancelled.
-3. **Row Level Security**: every authenticated caller may read the demo tables;
-   `anon` has no grants at all, and the function cannot widen anyone's access
-   because it runs with the caller's own privileges.
+   `statement_timeout = 5s`.
+3. **Role-level grants and RLS**: `demo_reader` has `SELECT` on exactly the two
+   demo tables, read policies for those tables, and no grant on `documents` or
+   `chunks` — nor membership in a role that has one. `anon` cannot execute the
+   function at all. A caller still has to authenticate before PostgREST will run
+   it, but the SQL itself can no longer run with the caller's full privileges.
 
 The analyst agent gets at most two attempts: generate, and — if the query is
 rejected or fails — one repair with the database's own complaint as feedback.
@@ -616,11 +631,90 @@ call at all.
 
 ---
 
+## Security hardening (Phase 7)
+
+Security is enforced in the backend, not asked of the model. The controls below
+are deliberately small and testable, and each one states its own limit.
+
+### Per-caller request budgets
+
+Two sliding 60-second windows are tracked per identity: **standard** (default
+240/min) for reads, metadata and deletes, and **model** (default 30/min) for endpoints
+that call an LLM or embedding model — chat, intent, upload, search, ask,
+workflow, reports. A rejected request gets `429 rate_limited` with a
+`Retry-After` header. The check runs before the handler, so it costs no model
+call and writes no row.
+
+The honest caveat: the counters live in the serving process. With N workers the
+effective budget is N × the configured value, and a restart forgets the window.
+That is acceptable for the current single-instance deployment and is why Phase 9
+puts a shared counter (Redis) on the list. `RATE_LIMIT_ENABLED=false` turns the
+budgets off; production logs a warning when they are off.
+
+### Append-only audit trail
+
+Five actions write an event: `document.uploaded`, `document.deleted`,
+`documents.asked`, `workflow.ran`, `report.generated`. Migration
+`0007_audit_events.sql` creates `public.audit_events` with:
+
+- **The actor from the token, not the payload.** The only write path is
+  `record_audit_event()`, which derives `actor_id` from `auth.uid()`. The
+  Supabase repository never sends an actor id, so a direct caller cannot write
+  an event under another user's name.
+- **Append-only.** No `UPDATE` or `DELETE` grant or policy exists for
+  `authenticated`; the service role keeps `DELETE` for retention jobs.
+- **Read your own.** The `SELECT` policy compares `actor_id` to `auth.uid()`.
+- **Metadata, not content.** The detail holds counts, routes, flags and source
+  labels — never document text, prompts, answers or credentials — and is capped
+  at 8 KiB.
+
+Writes are best-effort: if the audit insert fails, the request logs
+`audit_event_not_recorded` and still succeeds. The action has already happened;
+turning a logging failure into a 500 would invite a retry that duplicates it.
+`scripts/check_audit.py` proves the actor, isolation and immutability live.
+
+### Prompt-injection defence
+
+Untrusted text was already labelled (`<context>`, `<documents>`,
+`<web_results>`, `<rows>`, `<evidence>`) and the system prompts say labelled
+content is data. Phase 7 adds two pieces:
+
+- **Delimiter neutralisation.** The application's own block tags found *inside*
+  untrusted text are HTML-escaped before formatting. A document can no longer
+  contain `</context>` or `</evidence>` and end its data block early. Report
+  evidence is neutralised per source before the framing tags are added.
+- **A conservative detector.** Known patterns (instruction overrides, prompt
+  extraction, role changes, credential exfiltration, delimiter escapes) log
+  `possible_prompt_injection` with the source and marker names — never the
+  text. It does not block: a phrase match is easy to evade and would drop
+  legitimate documents, so the signal is for an operator and the structural
+  controls are what bound the damage.
+
+### Production hygiene
+
+Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options:
+DENY`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store` — answers
+and reports are tenant data and must not sit in a shared cache. Production adds
+`Strict-Transport-Security`; development deliberately does not, because pinning
+`localhost` to HTTPS would break the next run. In production, `ALLOWED_HOSTS`
+feeds `TrustedHostMiddleware`, so a forged `Host` header is rejected before
+routing, and a wildcard CORS or host setting is logged as a warning at startup.
+
+### What Phase 7 does not claim
+
+- The detector is a signal, not a sandbox. Permissions and the analytics
+  allowlist are the enforcement.
+- Rate limits are per process, not global (above).
+- The development `X-User-Id` stub is still not a security control; it is
+  refused outside development and test.
+
+---
+
 ## Run the tests and checks
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest          # 470 passed, 5 skipped
+.\.venv\Scripts\python.exe -m pytest          # 502 passed, 5 skipped
 .\.venv\Scripts\python.exe -m ruff check .    # lint
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
@@ -631,11 +725,12 @@ The 5 skipped tests are **live** tests that need a running provider. They are op
 $env:RUN_LIVE_LLM_TESTS="1"; .\.venv\Scripts\python.exe -m pytest tests/integration -v
 ```
 
-With a provider running the whole suite is green: **475 passed**, including real
+With a provider running the whole suite is green: **507 passed**, including real
 chat calls, real embeddings, and a full upload → retrieve → cite cycle.
 
-The Supabase side has its own live checks. Each creates throwaway users with the
-admin key, runs real requests, and deletes what it created:
+The Supabase side has its own live checks. The checks that need user accounts
+create throwaway users with the admin key, run real requests, and delete what
+they created:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\check_supabase.py   # credentials, schema, catalog audit
@@ -643,6 +738,7 @@ admin key, runs real requests, and deletes what it created:
 .\.venv\Scripts\python.exe scripts\check_store.py      # the application's store, end to end
 .\.venv\Scripts\python.exe scripts\check_storage.py    # bucket policies with two real users
 .\.venv\Scripts\python.exe scripts\check_analytics.py  # demo dataset + SQL function, end to end
+.\.venv\Scripts\python.exe scripts\check_audit.py      # audit actor, isolation, append-only
 .\.venv\Scripts\python.exe scripts\check_web_search.py # live search; exits 1 without a key
 ```
 
@@ -705,6 +801,7 @@ Every expected failure has a stable `code` and an actionable message:
 | `web_search_failed` | 502 | the search provider failed or returned an unusable response |
 | `analytics_query_rejected` | 400 | the generated SQL failed the read-only guard on both attempts |
 | `analytics_query_failed` | 400 | the generated SQL was refused or failed in the database on both attempts |
+| `rate_limited` | 429 | a per-identity request budget was exhausted; `Retry-After` says when to try again |
 
 Notes on the less obvious ones:
 
@@ -728,8 +825,10 @@ Responses include `request_id`, which also appears in the logs and in the
 - **Nothing is faked.** If the model is unavailable, requests fail with a clear
   error. There is no mock path in production code.
 - **Prompts forbid fabrication** and treat document/web/tool text as untrusted
-  data rather than instructions (the first layer of prompt-injection defence;
-  real enforcement happens outside the LLM in Phase 7).
+  data rather than instructions. Phase 7 makes that structural: the application's
+  own block tags are escaped inside untrusted text, and the analytics function
+  cannot read outside its two-table allowlist even if the model is fully
+  persuaded.
 - **Errors are typed.** Anything the API surfaces subclass `AppError`, so adding
   an error type never means editing routers.
 - **`safe_extra()` for logging.** Python's logging raises `KeyError` if an
@@ -751,7 +850,7 @@ Responses include `request_id`, which also appears in the logs and in the
 | 4 | Supabase: schema, Auth, Storage, RLS, persistence | ✅ done |
 | 5 | LangGraph workflow + state | ✅ done |
 | 6 | Tools & specialist agents + report generation | ✅ done |
-| 7 | Security, audit logging, rate limits, SQL safety | ⬜ |
+| 7 | Security, audit logging, rate limits, SQL safety | ✅ done |
 | 8 | React + TypeScript frontend | ⬜ |
 | 9 | Tests, Docker, deployment docs | ⬜ |
 

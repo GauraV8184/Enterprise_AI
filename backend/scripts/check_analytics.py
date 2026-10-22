@@ -18,11 +18,14 @@ What it checks, end to end:
      even when the application is bypassed and the RPC is called directly
   7. an unknown column fails with a repair hint meant for the model, not a guess
   8. a query that overruns 5 seconds is cancelled by ``statement_timeout``
-  9. the anon role cannot call the function at all
+  9. generated SQL cannot read anything except the two demo tables - not the
+     caller's documents, not another schema, not a system catalog - and the
+     function really runs as the restricted ``demo_reader`` role
+ 10. the anon role cannot call the function at all
 
 Every user it creates is deleted at the end, including on failure.
 
-Run it from ``backend`` (migration 0005 must already be applied):
+Run it from ``backend`` (migrations 0005 and 0006 must already be applied):
 
     .\\.venv\\Scripts\\python.exe scripts\\check_analytics.py
 
@@ -335,9 +338,7 @@ def run(settings: Settings) -> int:
             ("a DROP", "drop table demo_products"),
             ("a keyword inside a literal", "select 1 where 'delete' = 'delete'"),
         ):
-            response = client.rpc(
-                "run_demo_query", alice_token, {"sql": statements, "max_rows": 5}
-            )
+            response = client.rpc("run_demo_query", alice_token, {"sql": statements, "max_rows": 5})
             body = error_body(response)
             report.check(
                 response.status_code >= 400 and str(body.get("code")) == "P0001",
@@ -372,7 +373,65 @@ def run(settings: Settings) -> int:
                 exc.repair_hint,
             )
 
-        print("\n9) The anon role cannot call the function")
+        print("\n9) Generated SQL can read only the demo tables")
+        print("-" * 62)
+        for label, statements in (
+            ("the caller's documents", "select * from public.documents"),
+            ("the caller's chunks", "select count(*) as n from public.chunks"),
+            (
+                "a CTE over documents",
+                "with leaked as (select * from public.documents) select count(*) as n from leaked",
+            ),
+            ("a system catalog", "select rolname from pg_catalog.pg_roles"),
+        ):
+            try:
+                run_analytics_query(alice_repo, sql=statements, max_rows=5)
+                report.fail(f"{label} was readable through the analytics tool")
+            except AnalyticsQueryRejectedError as exc:
+                # The database may refuse during EXPLAIN (permission denied on
+                # documents/chunks) or after walking the plan (a catalog). Both
+                # are the same client-safe allowlist rejection, and the wording
+                # differs, so assert the guarantee rather than one exact string.
+                expected = "demo" in exc.message.lower()
+                report.check(
+                    expected,
+                    f"{label} is refused by the database",
+                    exc.message,
+                )
+            except AnalyticsQueryFailedError as exc:
+                # A permission error is still a refusal; surface it rather than
+                # pretending the allowlist produced the friendly message.
+                report.fail(f"{label} failed instead of being rejected", exc.repair_hint)
+
+        direct = client.rpc(
+            "run_demo_query", alice_token, {"sql": "select * from public.documents", "max_rows": 5}
+        )
+        direct_body = error_body(direct)
+        report.check(
+            direct.status_code >= 400 and str(direct_body.get("code")) == "P0001",
+            "the allowlist refuses documents even when the RPC is called directly",
+            f"HTTP {direct.status_code} {direct_body.get('message', direct.text[:160])}",
+        )
+
+        role = run_analytics_query(alice_repo, sql="select current_user as role_name", max_rows=5)
+        report.check(
+            role.rows == [{"role_name": "demo_reader"}],
+            "the function executes as demo_reader, not as the caller or postgres",
+            str(role.rows),
+        )
+
+        allowed = run_analytics_query(
+            alice_repo,
+            sql="select p.name from public.demo_products as p order by p.name limit 3",
+            max_rows=5,
+        )
+        report.check(
+            len(allowed.rows) == 3,
+            "the two demo tables remain readable through aliases and schema-qualified names",
+            str(allowed.rows),
+        )
+
+        print("\n10) The anon role cannot call the function")
         print("-" * 62)
         anon_response = client.rpc(
             "run_demo_query", None, {"sql": "select count(*) from demo_products", "max_rows": 5}
@@ -384,7 +443,7 @@ def run(settings: Settings) -> int:
             str(anon_body.get("message", anon_response.text[:160])),
         )
     finally:
-        print("\n10) Cleanup")
+        print("\n11) Cleanup")
         print("-" * 62)
         for label, user_id in users.items():
             try:

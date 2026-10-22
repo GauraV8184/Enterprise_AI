@@ -203,9 +203,7 @@ async def test_internal_documents_flag_wins_over_other_single_source_intents(
     repository: DocumentRepository, embeddings: HashingEmbeddings
 ) -> None:
     seed_document(repository, embeddings)
-    model = make_model(
-        make_intent("research", documents=True, web=True, complexity="multi_step")
-    )
+    model = make_model(make_intent("research", documents=True, web=True, complexity="multi_step"))
     model.replies = ["According to [1], twenty days."]
 
     state = await run_workflow(

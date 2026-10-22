@@ -399,11 +399,13 @@ class SupabaseDocumentRepository:
     def run_analytics_query(self, *, sql: str, max_rows: int = 100) -> list[dict[str, Any]]:
         """Run one validated read-only query through ``run_demo_query``.
 
-        The SQL function repeats the Python guard's rules and caps the result
-        itself, so a caller who bypasses the application still cannot run two
-        statements, write anything, or return an unbounded number of rows - and
-        a runaway query is stopped by the function's statement timeout. The
-        response shape is a jsonb array of row objects.
+        The SQL function repeats the Python guard's rules, runs as a role that
+        can read only the demo tables, rejects any plan that names another
+        relation or schema, and caps the result itself - so a caller who
+        bypasses the application still cannot read document text, write
+        anything, or return an unbounded number of rows. A runaway query is
+        stopped by the function's statement timeout. The response shape is a
+        jsonb array of row objects.
         """
         statement = validate_readonly_sql(sql)
         bounded = max(1, min(int(max_rows), MAX_ROWS_HARD_LIMIT))
@@ -423,3 +425,31 @@ class SupabaseDocumentRepository:
             extra=safe_extra(rows=len(rows), row_cap=bounded),
         )
         return [dict(row) for row in rows]
+
+    def record_audit_event(
+        self,
+        *,
+        owner_id: str,
+        action: str,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        request_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one audit event through the caller-scoped RPC.
+
+        ``owner_id`` is not sent: the function derives the actor from the
+        caller's token with ``auth.uid()``, so a request cannot write an event
+        attributed to another user. The parameter exists on the protocol so the
+        SQLite store can scope its own rows.
+        """
+        self._client.post(
+            "/rpc/record_audit_event",
+            json={
+                "action": action,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "request_id": request_id,
+                "detail": detail or {},
+            },
+        )

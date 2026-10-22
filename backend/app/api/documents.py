@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, File, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Response, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import ChatModelDep, EmbeddingsDep, FileStoreDep, RepositoryDep, SettingsDep
 from app.core.errors import AppError
@@ -32,8 +33,10 @@ from app.schemas.documents import (
     SearchResponse,
     SourceCitation,
 )
+from app.security.audit import record_event
 from app.security.file_validation import normalize_filename, validate_upload
 from app.security.identity import CurrentUserDep
+from app.security.rate_limit import model_rate_limit, standard_rate_limit
 
 logger = get_logger(__name__)
 
@@ -102,6 +105,7 @@ def _require_document(repository: RepositoryDep, owner_id: str, document_id: str
     response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Upload and index a document",
+    dependencies=[Depends(model_rate_limit)],
 )
 def upload_document(
     file: Annotated[UploadFile, File(description="The file to index. See the supported types.")],
@@ -177,10 +181,28 @@ def upload_document(
         exc.details = {**exc.details, "document_id": record.id, "status": STATUS_FAILED}
         raise
 
+    record_event(
+        repository,
+        user=user,
+        action="document.uploaded",
+        resource_type="document",
+        resource_id=result.document.id,
+        detail={
+            "extension": file_type.extension,
+            "size_bytes": len(data),
+            "chunk_count": result.document.chunk_count,
+            "status": result.document.status,
+        },
+    )
     return DocumentResponse.from_record(result.document)
 
 
-@router.get("", response_model=DocumentListResponse, summary="List your documents")
+@router.get(
+    "",
+    response_model=DocumentListResponse,
+    summary="List your documents",
+    dependencies=[Depends(standard_rate_limit)],
+)
 def list_documents(
     repository: RepositoryDep,
     user: CurrentUserDep,
@@ -191,7 +213,12 @@ def list_documents(
     return DocumentListResponse(documents=documents, total=len(documents))
 
 
-@router.get("/{document_id}", response_model=DocumentResponse, summary="Get one document")
+@router.get(
+    "/{document_id}",
+    response_model=DocumentResponse,
+    summary="Get one document",
+    dependencies=[Depends(standard_rate_limit)],
+)
 def get_document(
     document_id: str,
     repository: RepositoryDep,
@@ -205,6 +232,7 @@ def get_document(
     "/{document_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a document and its vectors",
+    dependencies=[Depends(standard_rate_limit)],
 )
 def delete_document(
     document_id: str,
@@ -233,12 +261,23 @@ def delete_document(
 
     repository.delete_document(owner_id=user.user_id, document_id=document_id)
 
+    record_event(
+        repository,
+        user=user,
+        action="document.deleted",
+        resource_type="document",
+        resource_id=record.id,
+        detail={"filename": record.filename},
+    )
     logger.info("document_deleted", extra=safe_extra(document_id=document_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
-    "/search", response_model=SearchResponse, summary="Semantic search over your documents"
+    "/search",
+    response_model=SearchResponse,
+    summary="Semantic search over your documents",
+    dependencies=[Depends(model_rate_limit)],
 )
 def search_documents(
     payload: SearchRequest,
@@ -275,6 +314,7 @@ def search_documents(
     "/ask",
     response_model=AskResponse,
     summary="Answer a question from your documents",
+    dependencies=[Depends(model_rate_limit)],
 )
 async def ask_documents(
     payload: AskRequest,
@@ -309,6 +349,17 @@ async def ask_documents(
             sources=len(result.sources),
             searched_chunks=result.searched_chunks,
         ),
+    )
+    await run_in_threadpool(
+        record_event,
+        repository,
+        user=user,
+        action="documents.asked",
+        detail={
+            "grounded": result.grounded,
+            "sources": len(result.sources),
+            "searched_chunks": result.searched_chunks,
+        },
     )
 
     return AskResponse(

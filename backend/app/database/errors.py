@@ -81,7 +81,9 @@ class AnalyticsQueryRejectedError(AppError):
 
     status_code = 400
     code = "analytics_query_rejected"
-    public_message = "The generated query was rejected: it must be a single read-only SELECT statement."
+    public_message = (
+        "The generated query was rejected: it must be a single read-only SELECT statement."
+    )
 
 
 class AnalyticsQueryFailedError(AppError):

@@ -28,6 +28,7 @@ from app.database.repositories import DocumentStore
 from app.llm.prompts import REPORT_SYSTEM_PROMPT, build_report_prompt
 from app.llm.service import TokenUsage, generate_answer
 from app.rag.retriever import RetrievedChunk, format_context, search
+from app.security.prompt_injection import prepare_untrusted_text
 from app.tools.analytics import AnalyticsResult, render_rows
 from app.tools.web_search import WebResult, WebSearch, WebSearchNotConfiguredError
 
@@ -137,7 +138,8 @@ async def generate_report(
         searched_chunks = result.searched_chunks
         if result.matches:
             context, documents = format_context(result.matches, max_chars=max_context_chars)
-            blocks.append(f"<documents>\n{context}\n</documents>")
+            safe_context = prepare_untrusted_text(context, source="documents")
+            blocks.append(f"<documents>\n{safe_context}\n</documents>")
         else:
             gaps.append("internal documents")
 
@@ -145,12 +147,12 @@ async def generate_report(
         analytics = await generate_and_run_query(store, model, question=topic, max_rows=max_rows)
         if analytics.rows:
             rows_text, shown = render_rows(analytics.rows)
-            blocks.append(
-                "<analytics>\n"
+            body = (
                 f"SQL: {analytics.sql}\n"
-                f"Rows ({shown} of {analytics.row_count} shown, as JSON):\n{rows_text}\n"
-                "</analytics>"
+                f"Rows ({shown} of {analytics.row_count} shown, as JSON):\n{rows_text}"
             )
+            safe_body = prepare_untrusted_text(body, source="analytics_rows")
+            blocks.append(f"<analytics>\n{safe_body}\n</analytics>")
         else:
             gaps.append("business data (the query ran and matched no rows)")
 
@@ -163,7 +165,8 @@ async def generate_report(
         web_queries = gathering.queries
         if gathering.results:
             context, web_results = format_web_context(gathering.results)
-            blocks.append(f"<web_results>\n{context}\n</web_results>")
+            safe_context = prepare_untrusted_text(context, source="web_search")
+            blocks.append(f"<web_results>\n{safe_context}\n</web_results>")
         else:
             gaps.append("web search")
 

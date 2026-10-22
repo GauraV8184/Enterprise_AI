@@ -1,7 +1,7 @@
 # Architecture — Enterprise AI Intelligence Platform
 
 This note explains how the backend is put together and why, focusing on what
-exists after **Phase 5**. It is written to be read by someone learning the
+exists after **Phase 7**. It is written to be read by someone learning the
 stack, so it favors plain language over jargon.
 
 ## 1. High-level shape
@@ -41,15 +41,27 @@ app/
   graph/
     state.py     The state every workflow node reads and updates.
     workflow.py  The supervisor: classify -> route -> answer.
+  agents/
+    analyst.py   SQL generation, execution, one repair, then a summary.
+    research.py  Query planning, deduplication, cited web answers.
+    report.py    Evidence gathering + Markdown report writing.
+  tools/
+    analytics.py Demo schema + the boundary around generated SQL.
+    web_search.py Tavily client (plain httpx).
   database/
     repositories.py        The store contract + the SQLite implementation.
     supabase_repository.py PostgREST-backed store; ranking runs in pgvector.
     postgrest.py           Per-caller HTTP transport: token, headers, error mapping.
+    sql_guard.py           Read-only SQL pre-flight rules + table allowlist.
+    demo_data.py           The demo sales dataset (same seed for both stores).
     errors.py              Store failures with stable codes.
   security/
     file_validation.py  Extension, size and magic-byte checks.
     identity.py         Who is asking: Supabase JWT, or the development stub.
     supabase_auth.py    Local JWT verification against the project's JWKS.
+    rate_limit.py       Per-identity sliding-window request budgets.
+    audit.py            Best-effort, append-only audit writes.
+    prompt_injection.py Detector + neutralisation of the app's block tags.
   api/
     deps.py      Shared dependencies.
     health.py    GET / and GET /health.
@@ -134,10 +146,9 @@ recommendation.
 
 - All five supervisor routes exist now (§16–§17), each backed by real code; a
   route whose tool is not configured fails with a typed 503 rather than
-  degrading. What is still missing is the Phase 7 hardening around them: real
-  prompt-injection enforcement, audit logging, and rate limits. The SQL path
-  already ships its own guard (§17), because executing generated SQL without
-  one would not be defensible even temporarily.
+  degrading. Phase 7 adds the hardening around them — per-caller rate limits, an
+  append-only audit trail, delimiter neutralisation in prompts, and a
+  two-table role behind the analytics function (§18).
 - No download endpoint for original files, and no signed URLs. Uploads and deletes
   use Storage; reading an original back is only done internally for indexing.
 - No janitor for the rare partial delete: if the object is removed and the row
@@ -145,7 +156,8 @@ recommendation.
   converges; nothing repairs it in the background.
 - No OCR for scanned PDFs — they fail with a clear error instead.
 - No background worker; indexing runs inline in the request.
-- No rate limiting — Phase 7.
+- No shared rate-limit counter: the limiter is per process (§18). Phase 9 adds
+  Redis.
 
 Anything not implemented is marked as such in the README roadmap rather than
 mocked, so nothing pretends to work when it does not.
@@ -285,8 +297,22 @@ Added in Phase 4:
 - The development `X-User-Id` stub is accepted only in `development` and `test`;
   staging and production refuse to start without Supabase Auth.
 
-Not yet established: rate limiting and audit logging (Phase 7), and validation
-for any model-generated SQL in later agent phases.
+Added in Phase 7:
+- Per-identity rate limits for standard and model-calling routes, with a 429 and
+  `Retry-After` before the handler runs.
+- An append-only audit trail whose actor is derived from the token, readable only
+  by its owner, with no update/delete path for application roles.
+- Prompt-injection hardening: untrusted block tags are escaped, and known
+  patterns are logged without blocking.
+- Generated SQL is restricted to the two demo tables by a `SECURITY DEFINER`
+  function owned by a role with no other grants, plus an EXPLAIN plan check. The
+  SQLite store enforces the same allowlist with an authorizer.
+- Defensive response headers; production HSTS and host validation.
+
+**The limits are part of the posture.** Rate-limit counters are per process, the
+injection detector is a signal rather than a sandbox, and the analytics function
+is only as strong as the `demo_reader` role's grants (which migration `0006`
+keeps to two tables). These are stated in the README rather than implied away.
 
 **The identity caveat, and how Phase 4 closed it.** Phase 3 shipped without
 authentication: the acting user came from an `X-User-Id` header, which anyone can
@@ -737,24 +763,32 @@ the bounds are independent, and each fails closed:
 
 1. **`app/database/sql_guard.py`** - a string-level pre-flight: exactly one
    statement, must start with `SELECT`/`WITH`, a keyword blocklist (including
-   `do`, `set`, `lock`, `begin`…), no semicolon anywhere (comments included),
-   and a 4000-character limit. It is conservative and says which rule it broke,
-   because that message is fed back to the model as repair feedback.
-2. **`run_demo_query()` in migration `0005`** - the guard repeated in plpgsql,
-   an outer `LIMIT` capped at 200 (default 100, `ANALYTICS_MAX_ROWS`),
-   `statement_timeout = 5s`, and - the part that does not depend on any string
-   check - `STABLE` plus `SECURITY INVOKER`. PostgreSQL refuses
-   data-modifying statements inside a non-volatile function, and because the
-   function runs with the caller's own privileges it cannot read anything RLS
-   would hide from them. The `anon` role cannot execute it at all.
-3. **Row Level Security** - authenticated callers may read the demo tables;
-   nobody has write policies; `anon` has no grants.
+   `do`, `set`, `lock`, `begin`…), no semicolon anywhere (comments included), a
+   4000-character limit, and a table allowlist (`ALLOWED_TABLES`). It is
+   conservative and says which rule it broke, because that message is fed back to
+   the model as repair feedback. Because SQLite has no roles or RLS, its store
+   also installs a connection authorizer: reads of any table outside the two
+   demo tables are refused at prepare time, including through aliases and CTEs.
+2. **`run_demo_query()` (migrations `0005` + `0006`)** - the guard repeated in
+   plpgsql, an outer `LIMIT` capped at 200 (default 100, `ANALYTICS_MAX_ROWS`),
+   `statement_timeout = 5s`, and `STABLE`, so PostgreSQL itself refuses
+   data-modifying statements. Migration `0006` makes it `SECURITY DEFINER`,
+   owned by the non-login `demo_reader` role, and adds the decisive control: it
+   runs `EXPLAIN (FORMAT JSON, VERBOSE)`, walks every `"Relation Name"` node in
+   the plan, and refuses any relation that is not `public.demo_products` or
+   `public.demo_sales_orders` before the query executes.
+3. **Role grants and RLS** - `demo_reader` has `SELECT` on exactly those two
+   tables, no grant on `documents` or `chunks`, no memberships that would lend
+   it more, and read policies for the demo tables. `anon` has no `EXECUTE` on the
+   function at all. A caller must still authenticate before PostgREST will run
+   it, but the SQL can no longer read with the caller's full privileges.
 
-PostgREST error mapping makes the layers distinguishable: `P0001` from the
-function becomes `AnalyticsQueryRejectedError` (safe to show), while any other
-RPC failure - including SQLSTATE `57014` for the timeout - becomes
-`AnalyticsQueryFailedError`, whose `repair_hint` holds the database's complaint
-for the repair loop and never reaches the client.
+PostgREST error mapping makes the layers distinguishable, and it keys on the
+Postgres SQLSTATE rather than the HTTP status: `P0001` from the function becomes
+`AnalyticsQueryRejectedError` (safe to show), while any other non-`PGRST`
+code - including `42P01`, which PostgREST returns as 404, and `57014` for the
+statement timeout - becomes `AnalyticsQueryFailedError`, whose `repair_hint`
+holds the database's complaint for the repair loop and never reaches the client.
 
 ### The repair loop stops at one retry
 
@@ -820,3 +854,152 @@ all. `grounded` is `false` in that case, mirroring RAG's empty-corpus rule.
   `LLM_TIMEOUT_SECONDS=240` and all 15 checks passed. The research leg skipped
   itself with an explanation. None of this was hidden or silently retried into
   a green result.
+
+## 18. Security hardening (Phase 7)
+
+Phase 7 adds `app/security/rate_limit.py`, `audit.py` and
+`prompt_injection.py`, migrations `0006` and `0007`, and the middleware that
+makes the production posture explicit. The design rule is the same as in Phase
+4: enforcement lives in code and in the database, not in a prompt and not in a
+setting an operator can forget.
+
+### Request budgets: per identity, honestly per process
+
+A single token should not be able to turn one account into an unbounded bill or
+queue. Two sliding 60-second windows are counted per identity:
+
+- **standard** (default 240/min) for reads, metadata and deletes;
+- **model** (default 30/min) for endpoints that call an LLM or an embedding
+  model: chat, intent, upload, search, ask, workflow and reports.
+
+A sliding window is used rather than a fixed minute so a caller cannot spend the
+whole budget at 12:00:59 and again at 12:01:00. The check is a dependency, so it
+runs before the handler: a rejected request costs no model call and writes no
+row. The error is `429 rate_limited` with `Retry-After` set from the oldest hit
+in the window, and `AppError` grew an optional `headers` field rather than
+special-casing 429 in the handler.
+
+The caveat is stated in the code, the README and `.env.example`: the counters
+are in the serving process. N workers multiply the effective budget, and a
+restart forgets the window. That is acceptable for the current single-instance
+deployment, and it is why Phase 9 adds a shared counter. Claiming a global limit
+here would be false.
+
+### Audit: the actor is not a parameter
+
+`audit_events` (migration `0007`) records uploads, deletes, document questions,
+workflow runs and generated reports. The important choices:
+
+- **One write path.** `record_audit_event()` is a `SECURITY DEFINER` function
+  that takes the action and metadata, and derives `actor_id` from `auth.uid()`.
+  The RPC has no actor parameter, and the Supabase repository never sends one.
+  A direct RPC caller cannot choose whose trail they write to; an unknown extra
+  argument does not match the function signature at all.
+- **Append-only.** `authenticated` has `SELECT` and `EXECUTE` only. There is no
+  `INSERT` grant (the function is the only writer), and no `UPDATE` or `DELETE`
+  grant or policy. The service role keeps `DELETE` solely so a retention job can
+  remove old events; it is not used by the application.
+- **Read your own.** The `SELECT` policy compares `actor_id` to `auth.uid()`, so
+  tenant isolation applies to the trail as well.
+- **Metadata, not content.** Detail holds counts, route names, flags and source
+  labels. It never holds document text, prompts, answers or credentials, and it
+  is capped at 8 KiB by a check constraint.
+- **No foreign key to `auth.users`.** Deleting a user must not erase the history
+  of what that user did; a retention policy decides when events go.
+
+The write is best-effort. `app/security/audit.py` catches any failure, logs
+`audit_event_not_recorded` with the action and exception type, and returns. The
+action has already happened by then; converting a logging failure into a 500
+would invite the caller to retry and duplicate the effect. The opposite choice
+- failing the request when the audit write fails - sounds stricter but produces
+worse behaviour.
+
+### Prompt injection: structure first, detection second
+
+The prompts already put untrusted text inside labelled blocks (`<context>`,
+`<documents>`, `<web_results>`, `<rows>`, `<evidence>`) and instruct the model
+to treat those blocks as data. Phase 7 adds the mechanical part:
+
+- **Neutralisation.** Before text is embedded in a prompt, any of the
+  application's own block tags inside it are HTML-escaped. A document containing
+  `</context>` can no longer end its block and promote the rest of its text to
+  instructions. The report agent neutralises each source (documents, analytics
+  rows, web snippets) *before* adding its own `<documents>` / `<analytics>` /
+  `<web_results>` framing; neutralising the assembled string instead would
+  escape the application's own tags and break the prompt.
+- **Detection.** A small set of patterns - instruction overrides, prompt
+  extraction, role changes, credential exfiltration, delimiter escapes - logs
+  `possible_prompt_injection` with the source and marker names. It never logs
+  the text, and it never blocks. A phrase match is easy to evade and would drop
+  legitimate documents; the log is an operator signal, and the structural
+  controls are what bound the damage.
+
+The order matters: detection sees the raw text, then neutralisation makes it
+inert. A test asserts that a hostile document's closing tag survives only in
+escaped form in the final prompt.
+
+### The analytics function runs as a two-table role
+
+Phase 6's function was `SECURITY INVOKER`: it could not exceed the caller's
+privileges, but it *did* run with them. Since every authenticated caller can
+read their own `documents` and `chunks`, a generated query that passed the
+string guard could read the caller's document text. The string guard cannot
+catch `select * from documents` - it is valid, starts with `SELECT`, and uses no
+blocked keyword.
+
+Migration `0006` closes that:
+
+- the function is `SECURITY DEFINER`, owned by `demo_reader`, a `NOLOGIN`,
+  `NOSUPERUSER`, `NOBYPASSRLS` role;
+- `demo_reader` has `SELECT` on the two demo tables and **no** grant on
+  `documents`, `chunks` or anything else outside `public` (and only `USAGE` on
+  the schema);
+- the function plans the statement through a small `VOLATILE` helper,
+  `explain_demo_query(text)`, and walks every `"Relation Name"` node. Every
+  relation must be `public.demo_products` or `public.demo_sales_orders`; any
+  other table, view or schema is a `P0001` rejection. This is a plan check, not
+  a regex: aliases, CTEs and subqueries are already resolved to real relation
+  names by the planner;
+- read policies for `demo_reader` keep RLS meaningful while the function runs as
+  that role.
+
+The planning helper is separate because PostgreSQL rejects `EXPLAIN` inside a
+`STABLE` function ("EXPLAIN is not allowed in a non-volatile function"), and the
+executor must stay `STABLE` so Postgres also refuses data-modifying statements.
+Splitting the two keeps both guarantees: planning is `VOLATILE`, execution is
+not. The helper is owned by `demo_reader` and executable only by its owner;
+the migration removes the default PUBLIC, `anon`, `authenticated` and
+`service_role` grants.
+
+The SQLite store cannot use roles, so `DocumentRepository` installs a
+`sqlite3` connection authorizer around the generated statement. It sees the real
+table name through aliases, CTEs and `count(*)`, and collects denials into the
+same client-safe `AnalyticsQueryRejectedError` the Postgres path produces, naming
+the offending table so the analyst can repair. The two implementations enforce
+the same `ALLOWED_TABLES` set.
+
+### Response and production hygiene
+
+Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options:
+DENY`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The API is
+JSON-only, so these are cheap; `no-store` matters because an answer or a report
+is tenant data and must not sit in a browser or proxy cache. HSTS is added only
+in production: sending it in development would pin `localhost` to HTTPS in the
+developer's browser and break the next run.
+
+In production, `ALLOWED_HOSTS` feeds Starlette's `TrustedHostMiddleware`, added
+after CORS so it wraps it and a forged `Host` header is rejected before routing.
+A wildcard CORS origin or wildcard host list in production is logged as a
+warning at startup rather than silently accepted. Rate limiting is on by
+default; setting `RATE_LIMIT_ENABLED=false` logs a warning in production.
+
+### What these controls do not claim
+
+- The injection detector is a signal, not a sandbox. Permissions and the
+  analytics allowlist are the enforcement.
+- Rate limits are per process, not global (above).
+- The development `X-User-Id` stub is still not a security control; it is
+  refused outside development and test.
+- Migration `0006` creates a database role, so the migration runner must have
+  the privilege to do that. On Supabase that is the `postgres` connection used
+  by `apply_migrations.py`.

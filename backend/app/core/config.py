@@ -60,6 +60,20 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
 
+    allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["*"])
+    """Host header allowlist, enforced in production by TrustedHostMiddleware.
+
+    ``*`` accepts any host (the development default). A production deployment
+    should name its domains; a wildcard is logged as a warning at startup rather
+    than silently accepted.
+    """
+
+    rate_limit_enabled: bool = True
+    rate_limit_standard_per_minute: int = Field(default=240, ge=1, le=100_000)
+    rate_limit_model_per_minute: int = Field(default=30, ge=1, le=10_000)
+    """Per-identity budgets. See :mod:`app.security.rate_limit` for the caveat:
+    the counters are per process, so N workers multiply the effective limit."""
+
     llm_provider: LlmProvider = "openai"
 
     openai_api_key: SecretStr | None = None
@@ -110,9 +124,9 @@ class Settings(BaseSettings):
 
     auth_backend: Literal["auto", "dev", "supabase"] = "auto"
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "allowed_hosts", mode="before")
     @classmethod
-    def _parse_cors_origins(cls, value: object) -> object:
+    def _parse_string_list(cls, value: object) -> object:
         """Accept either a JSON array or a comma-separated string.
 
         ``pydantic-settings`` normally expects JSON for list fields, which is

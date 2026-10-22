@@ -127,9 +127,7 @@ class TavilySearch:
         }
 
         try:
-            response = self._client.post(
-                TAVILY_SEARCH_URL, json=payload, timeout=self._timeout
-            )
+            response = self._client.post(TAVILY_SEARCH_URL, json=payload, timeout=self._timeout)
         except httpx.HTTPError as exc:
             logger.warning(
                 "web_search_unreachable",

@@ -39,14 +39,14 @@ def test_reports_reject_a_blank_topic(llm_client: TestClient) -> None:
 
 
 def test_reports_reject_unknown_fields(llm_client: TestClient) -> None:
-    response = llm_client.post(
-        "/api/reports", json={"topic": "leave", "temperature": 0.9}
-    )
+    response = llm_client.post("/api/reports", json={"topic": "leave", "temperature": 0.9})
     assert response.status_code == 422
 
 
 def test_reports_reject_an_empty_source_list(llm_client: TestClient) -> None:
-    assert llm_client.post("/api/reports", json={"topic": "leave", "sources": []}).status_code == 422
+    assert (
+        llm_client.post("/api/reports", json={"topic": "leave", "sources": []}).status_code == 422
+    )
 
 
 def test_reports_reject_an_unknown_source(llm_client: TestClient) -> None:

@@ -35,6 +35,11 @@ def settings(tmp_path: Path) -> Settings:
         data_dir=tmp_path / "data",
         chunk_size=400,
         chunk_overlap=80,
+        # Rate limiting is exercised by its own tests with explicit, low limits.
+        # The rest of the suite deliberately keeps it off: several tests upload
+        # many documents and would otherwise spend the model budget while
+        # testing something else.
+        rate_limit_enabled=False,
         _env_file=None,  # type: ignore[call-arg]  # ignore any developer .env
     )
 

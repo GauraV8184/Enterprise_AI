@@ -35,6 +35,15 @@ MAX_SQL_CHARS = 4000
 
 MAX_ROWS_HARD_LIMIT = 200
 
+ALLOWED_TABLES = frozenset({"demo_products", "demo_sales_orders"})
+"""The only relations the analytics tool may read.
+
+The SQLite store enforces this with a connection authorizer and Postgres with a
+privilege set plus a plan check; keeping the names in one place means the two
+backends cannot disagree about what the demo dataset is. Checked against
+:mod:`app.database.demo_data` in the tests.
+"""
+
 _READ_ONLY_START = re.compile(r"^(?:select|with)\b", re.IGNORECASE)
 
 _FORBIDDEN_KEYWORDS = re.compile(

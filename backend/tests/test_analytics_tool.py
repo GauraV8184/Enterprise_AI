@@ -16,7 +16,7 @@ import pytest
 from app.database.demo_data import DEMO_ORDER_COUNT, DEMO_PRODUCTS, demo_sales_rows
 from app.database.errors import AnalyticsQueryFailedError, AnalyticsQueryRejectedError
 from app.database.repositories import DocumentRepository
-from app.database.sql_guard import MAX_ROWS_HARD_LIMIT
+from app.database.sql_guard import ALLOWED_TABLES, MAX_ROWS_HARD_LIMIT
 from app.tools.analytics import (
     DEMO_SCHEMA_DESCRIPTION,
     render_rows,
@@ -112,6 +112,70 @@ def test_inner_limit_cannot_defeat_the_cap(store: DocumentRepository) -> None:
 def test_guard_rejection_never_reaches_the_database(store: DocumentRepository) -> None:
     with pytest.raises(AnalyticsQueryRejectedError):
         run_analytics_query(store, sql="drop table demo_sales_orders", max_rows=10)
+
+
+def test_only_the_demo_tables_can_be_read(store: DocumentRepository) -> None:
+    """A read is the dangerous case the keyword guard cannot catch.
+
+    ``select * from documents`` is valid SQL, starts with SELECT, and contains no
+    forbidden word - and on the caller's own connection it would return their
+    document text. The authorizer refuses it before a row is read.
+    """
+    cases = [
+        ("select * from documents", "documents"),
+        ("select count(*) as n from chunks", "chunks"),
+        ("select name from sqlite_master", "sqlite_master"),
+    ]
+
+    for sql, table in cases:
+        with pytest.raises(AnalyticsQueryRejectedError) as caught:
+            run_analytics_query(store, sql=sql, max_rows=10)
+
+        assert table in caught.value.message
+        assert "demo_products" in caught.value.message
+
+
+def test_allowlist_cannot_be_evaded_with_aliases_or_ctes(store: DocumentRepository) -> None:
+    cases = [
+        "select d.filename from documents as d",
+        "with hidden as (select * from chunks) select count(*) as n from hidden",
+        "select * from (select * from documents) as sub",
+    ]
+
+    for sql in cases:
+        with pytest.raises(AnalyticsQueryRejectedError):
+            run_analytics_query(store, sql=sql, max_rows=10)
+
+
+def test_allowed_tables_still_work_through_aliases(store: DocumentRepository) -> None:
+    result = run_analytics_query(
+        store,
+        sql="select p.name from demo_products as p order by p.name limit 3",
+        max_rows=10,
+    )
+
+    assert len(result.rows) == 3
+
+
+def test_allowed_tables_still_work_through_a_cte(store: DocumentRepository) -> None:
+    """The authorizer must see the real table, not the CTE's name."""
+
+    result = run_analytics_query(
+        store,
+        sql=(
+            "with products as (select name from demo_products) "
+            "select name from products order by name limit 3"
+        ),
+        max_rows=10,
+    )
+
+    assert len(result.rows) == 3
+
+
+def test_allowlist_matches_the_documented_demo_schema() -> None:
+    assert ALLOWED_TABLES == {"demo_products", "demo_sales_orders"}
+    for table in ALLOWED_TABLES:
+        assert table in DEMO_SCHEMA_DESCRIPTION
 
 
 def test_a_broken_query_fails_with_a_repair_hint(store: DocumentRepository) -> None:

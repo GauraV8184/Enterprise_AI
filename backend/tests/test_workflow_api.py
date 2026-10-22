@@ -120,9 +120,7 @@ def test_workflow_routes_data_questions_and_returns_the_rows(
 ) -> None:
     fake_model.structured_results = [
         make_intent("data_analysis", business=True),
-        AnalyticsQuery(
-            sql="select count(*) as n from demo_products", reasoning="Counts products."
-        ),
+        AnalyticsQuery(sql="select count(*) as n from demo_products", reasoning="Counts products."),
     ]
     fake_model.replies = ["The demo catalogue holds 4 products."]
 

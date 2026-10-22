@@ -61,9 +61,7 @@ async def main() -> int:
         print("-" * 60)
         print(f"  Q: {QUERY}")
         try:
-            results = await search.search(
-                QUERY, max_results=settings.web_search_max_results
-            )
+            results = await search.search(QUERY, max_results=settings.web_search_max_results)
         except (WebSearchNotConfiguredError, WebSearchFailedError) as exc:
             print(f"\nRESULT: FAILED - {exc.message}")
             return 1

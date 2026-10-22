@@ -24,6 +24,8 @@ from fastapi import FastAPI, Request
 from app.api.deps import get_repository
 from app.core.config import Settings
 from app.database.errors import (
+    AnalyticsQueryFailedError,
+    AnalyticsQueryRejectedError,
     DocumentStoreError,
     DocumentStoreNotReadyError,
     DocumentStoreUnavailableError,
@@ -390,6 +392,89 @@ def test_a_vector_width_mismatch_becomes_a_409_with_both_numbers() -> None:
 
     assert "768" in excinfo.value.message
     assert "3" in excinfo.value.message
+
+
+def test_an_analytics_table_rejection_is_client_safe_and_repairable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return ok(
+            request,
+            {
+                "code": "P0001",
+                "message": "Table documents is not part of the demo dataset.",
+            },
+            status=400,
+        )
+
+    with pytest.raises(AnalyticsQueryRejectedError) as excinfo:
+        make_repository(handler).run_analytics_query(sql="select * from documents", max_rows=10)
+
+    assert "documents" in excinfo.value.message
+    assert excinfo.value.code == "analytics_query_rejected"
+
+
+def test_an_undefined_table_is_a_repairable_failure_not_a_missing_store() -> None:
+    """PostgREST maps 42P01 to 404. In the analytics path that is the query's
+    fault, not a deployment problem, and the analyst must see the hint."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return ok(
+            request,
+            {"code": "42P01", "message": 'relation "demo_orderz" does not exist'},
+            status=404,
+        )
+
+    with pytest.raises(AnalyticsQueryFailedError) as excinfo:
+        make_repository(handler).run_analytics_query(sql="select * from demo_orderz", max_rows=10)
+
+    assert "demo_orderz" in excinfo.value.repair_hint
+
+
+def test_an_analytics_statement_timeout_is_a_repairable_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return ok(
+            request,
+            {
+                "code": "57014",
+                "message": "canceling statement due to statement timeout",
+            },
+            status=500,
+        )
+
+    with pytest.raises(AnalyticsQueryFailedError) as excinfo:
+        make_repository(handler).run_analytics_query(sql="select pg_sleep(10)", max_rows=10)
+
+    assert "timeout" in excinfo.value.repair_hint
+
+
+def test_record_audit_event_never_sends_an_actor() -> None:
+    """The actor comes from the token inside the function. If the client could
+    choose it, one user's trail could be written under another user's id."""
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, json.loads(request.content)))
+        return ok(request, "7c0f0a4e-8d63-4a6b-9c0e-2b1f4d5a6e7f")
+
+    make_repository(handler).record_audit_event(
+        owner_id=USER_ID,
+        action="document.deleted",
+        resource_type="document",
+        resource_id=DOC_ID,
+        request_id="req-1",
+        detail={"filename": "notes.txt"},
+    )
+
+    assert len(calls) == 1
+    path, body = calls[0]
+    assert path.endswith("/rpc/record_audit_event")
+    assert body == {
+        "action": "document.deleted",
+        "resource_type": "document",
+        "resource_id": DOC_ID,
+        "request_id": "req-1",
+        "detail": {"filename": "notes.txt"},
+    }
+    assert "owner_id" not in body
 
 
 def test_get_repository_points_at_rest_v1_exactly_once() -> None:

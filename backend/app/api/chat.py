@@ -10,7 +10,7 @@ fails with 503 and a message explaining exactly which setting is missing.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api.deps import ChatModelDep, SettingsDep
 from app.core.logging import get_logger, request_id_ctx, safe_extra
@@ -24,13 +24,19 @@ from app.schemas.chat import (
     TokenUsage,
 )
 from app.security.identity import CurrentUserDep
+from app.security.rate_limit import model_rate_limit, standard_rate_limit
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-@router.get("/status", response_model=LlmStatusResponse, summary="LLM configuration status")
+@router.get(
+    "/status",
+    response_model=LlmStatusResponse,
+    summary="LLM configuration status",
+    dependencies=[Depends(standard_rate_limit)],
+)
 def llm_status(settings: SettingsDep, user: CurrentUserDep) -> LlmStatusResponse:
     """Report whether the LLM is configured, without exposing any secret.
 
@@ -48,7 +54,12 @@ def llm_status(settings: SettingsDep, user: CurrentUserDep) -> LlmStatusResponse
     )
 
 
-@router.post("", response_model=ChatResponse, summary="Send a chat completion request")
+@router.post(
+    "",
+    response_model=ChatResponse,
+    summary="Send a chat completion request",
+    dependencies=[Depends(model_rate_limit)],
+)
 async def chat(
     payload: ChatRequest,
     model: ChatModelDep,
@@ -88,7 +99,10 @@ async def chat(
 
 
 @router.post(
-    "/intent", response_model=IntentResponse, summary="Classify a request (structured output)"
+    "/intent",
+    response_model=IntentResponse,
+    summary="Classify a request (structured output)",
+    dependencies=[Depends(model_rate_limit)],
 )
 async def intent(
     payload: IntentRequest,

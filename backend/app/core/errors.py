@@ -22,9 +22,16 @@ class AppError(Exception):
     code: str = "internal_error"
     public_message: str = "An internal error occurred."
 
-    def __init__(self, message: str | None = None, *, details: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.message = message or self.public_message
         self.details = details or {}
+        self.headers = headers or {}
         super().__init__(self.message)
 
     def to_payload(self) -> dict[str, Any]:
