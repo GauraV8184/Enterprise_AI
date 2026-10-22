@@ -841,9 +841,10 @@ all. `grounded` is `false` in that case, mirroring RAG's empty-corpus rule.
   statement, a `DROP`, and a blocked keyword inside a string literal, an unknown
   column comes back as a repair hint, `pg_sleep(15)` is cancelled after ~5.2s,
   and `anon` is refused with 401. The throwaway users are deleted afterwards.
-- `scripts/check_web_search.py` exits 1 with "not configured" on this machine,
-  because there is no `TAVILY_API_KEY` here. That is reported as what it is -
-  an unverified leg - not as a passing check.
+- `scripts/check_web_search.py` returned five live results after a
+  `TAVILY_API_KEY` was configured. Without a key it still exits 1 with "not
+  configured" rather than pretending to pass; a missing key is an unverified
+  leg, not a green check.
 - `scripts/check_workflow.py`: the first live run **failed one check honestly** -
   the local 8B model classified a "which region had the most revenue" question
   as a `report`, which is what the documented priority says must happen (report
@@ -1099,3 +1100,25 @@ navigation.
 - Docker, container validation, a production web server and CDN cache headers
   are Phase 9 work. The Phase 8 deliverable is the verified static `dist/` build
   and the development proxy.
+
+## Phase 9: delivery
+
+### Continuous integration
+
+`.github/workflows/ci.yml` is the merge gate. It runs two independent jobs on
+pushes to `main`, pull requests, and manual dispatches:
+
+- **Backend:** Python 3.12, development dependencies from
+  `requirements-dev.txt`, `ruff check`, `ruff format --check`, and
+  `pytest -m "not integration"`.
+- **Frontend:** Node.js 22, `npm ci`, ESLint, the TypeScript project build, and
+  the Vite production build.
+
+The gate deliberately excludes the `integration` marker. Those tests need a
+real LLM, embeddings, and network access, and a CI run without credentials must
+not pretend they passed. They remain opt-in through `RUN_LIVE_LLM_TESTS=1`.
+Neither job needs a repository secret: the default suite uses fake chat,
+embedding, and search clients and a temporary SQLite store.
+
+Container packaging, production configuration, and the deployment runbook are
+the remaining Phase 9 deliverables.

@@ -6,8 +6,7 @@ it retrieves internal documents (RAG), queries authorized business data safely
 reports — all coordinated by a LangGraph workflow behind a FastAPI backend and
 a React frontend.
 
-> **Status: Phase 8 of 9 complete, verified against live providers and a live
-> Supabase project.** Phases 1–8 — foundation, LLM integration, RAG over
+> **Status: Phase 9 of 9 in progress.** Phases 1–8 — foundation, LLM integration, RAG over
 > uploaded documents, Supabase persistence with Row Level Security, the
 > LangGraph supervisor, the specialist agents (SQL analytics, web research,
 > Markdown reports), security hardening (per-caller rate limits, an append-only
@@ -16,8 +15,8 @@ a React frontend.
 > to end. Validation used a local Ollama `llama3.1:8b` and live Supabase Auth.
 > Web research needs `TAVILY_API_KEY`; without it the research route answers a
 > typed 503, and `check_web_search.py` exits 1 saying "not configured" rather
-> than pretending to pass. Phase 9 adds container packaging and deployment. See
-> [Roadmap](#roadmap).
+> than pretending to pass. The CI gate is in place; container packaging and
+> deployment docs are next. See [Roadmap](#roadmap).
 
 ---
 
@@ -52,6 +51,7 @@ frontend never sees the Supabase service-role key or the LLM API key.
 
 ```
 Enterprize_AI/
+├── .github/workflows/ci.yml        # backend + frontend merge gate
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                 # app factory, lifespan, middleware
@@ -821,6 +821,19 @@ npm run build
 `npm run build` runs `tsc -b` and then Vite, so a type error fails the build.
 The generated `dist/` directory is git-ignored.
 
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes to
+`main`, pull requests, and manual dispatches. It needs no secrets:
+
+- **Backend:** installs `requirements-dev.txt`, runs `ruff check`,
+  `ruff format --check`, and `pytest -m "not integration"`.
+- **Frontend:** runs `npm ci`, `npm run lint`, `npm run typecheck`, and
+  `npm run build`.
+
+The integration tests are excluded because they need live provider
+credentials; run them manually with `RUN_LIVE_LLM_TESTS=1` as shown above.
+
 The Supabase side has its own live checks. The checks that need user accounts
 create throwaway users with the admin key, run real requests, and delete what
 they created:
@@ -945,7 +958,7 @@ Responses include `request_id`, which also appears in the logs and in the
 | 6 | Tools & specialist agents + report generation | ✅ done |
 | 7 | Security, audit logging, rate limits, SQL safety | ✅ done |
 | 8 | React + TypeScript frontend | ✅ done |
-| 9 | Tests, Docker, deployment docs | ⬜ |
+| 9 | CI gate, Docker, deployment docs | 🚧 in progress |
 
 ---
 
