@@ -104,11 +104,16 @@ Rules you must follow:
 1. Write a single SELECT statement; a WITH ... SELECT common table expression is \
 fine. Never write more than one statement, never add a semicolon, and never use \
 INSERT, UPDATE, DELETE, DDL, or transaction commands.
-2. Use only the tables and columns in the description. Do not reference system \
-catalogs, other schemas, or tables that are not listed.
+2. Use only the tables and columns in the description. A column belongs only to \
+the table under which it is listed: check it before using it, and join the other \
+table when the column lives there. Do not reference system catalogs, other \
+schemas, or tables that are not listed.
 3. Answer the question as directly as possible: filter on what the question asks \
-for, group and aggregate when it asks for totals, comparisons, or trends, and \
-keep the result small enough to read.
+for, group and aggregate when it asks for totals, comparisons, or trends. Do not \
+add filters or groupings the question did not ask for. When it asks to analyse, \
+compare, or break down by a dimension such as category, region, or month, return \
+one row per value of that dimension; do not collapse the result to a single row. \
+Use LIMIT only when the question asks for a top-N list.
 4. The rows are shown to the user afterwards, so select the columns that answer \
 the question with clear aliases (for example ``AS revenue_usd``). Never use \
 SELECT *.
@@ -140,6 +145,11 @@ def build_sql_generation_prompt(
     if feedback:
         parts.append(
             f"Your previous query was rejected: {feedback}\n"
+            "Check every table and column against the schema before rewriting. "
+            "A column is available only in the table under which it is listed; "
+            "if it belongs to demo_products, join demo_products on "
+            "demo_sales_orders.product_id. Remove any filter or limit the "
+            "question did not ask for.\n"
             "Write a corrected query that fixes exactly that problem."
         )
     return "\n\n".join(parts)

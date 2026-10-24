@@ -17,10 +17,12 @@ from app.database.demo_data import DEMO_ORDER_COUNT, DEMO_PRODUCTS, demo_sales_r
 from app.database.errors import AnalyticsQueryFailedError, AnalyticsQueryRejectedError
 from app.database.repositories import DocumentRepository
 from app.database.sql_guard import ALLOWED_TABLES, MAX_ROWS_HARD_LIMIT
+from app.llm.prompts import build_sql_generation_prompt
 from app.tools.analytics import (
     DEMO_SCHEMA_DESCRIPTION,
     render_rows,
     run_analytics_query,
+    strip_unrequested_limit,
 )
 
 
@@ -193,6 +195,57 @@ def test_schema_description_describes_the_seeded_tables() -> None:
     assert str(DEMO_ORDER_COUNT) in DEMO_SCHEMA_DESCRIPTION
     for product in DEMO_PRODUCTS:
         assert product.category in DEMO_SCHEMA_DESCRIPTION
+
+
+def test_schema_description_names_the_join_for_product_columns() -> None:
+    """A small model must be told which table owns category, not infer it."""
+    assert "demo_sales_orders does not contain category" in DEMO_SCHEMA_DESCRIPTION
+    assert "JOIN demo_products AS p ON p.id = o.product_id" in DEMO_SCHEMA_DESCRIPTION
+    assert "Never add a date filter" in DEMO_SCHEMA_DESCRIPTION
+
+
+def test_a_breakdown_question_loses_an_invented_limit() -> None:
+    sql = (
+        "select p.category, sum(o.revenue) as revenue_usd "
+        "from demo_sales_orders as o join demo_products as p on p.id = o.product_id "
+        "group by p.category order by revenue_usd desc limit 1"
+    )
+
+    assert strip_unrequested_limit(
+        sql, "Analyse revenue by product category and recommend the next focus."
+    ) == (
+        "select p.category, sum(o.revenue) as revenue_usd "
+        "from demo_sales_orders as o join demo_products as p on p.id = o.product_id "
+        "group by p.category order by revenue_usd desc"
+    )
+
+
+def test_a_count_named_in_the_question_keeps_its_limit() -> None:
+    sql = "select name, unit_price from demo_products order by unit_price desc limit 3"
+
+    assert strip_unrequested_limit(sql, "What are the top 3 products by price?") == sql
+    assert strip_unrequested_limit(sql, "Show the first ten products") == sql
+
+
+def test_a_limit_inside_a_subquery_is_left_alone() -> None:
+    sql = (
+        "select count(*) as n from (select id from demo_products limit 1) as sample"
+    )
+
+    assert strip_unrequested_limit(sql, "Compare revenue by category") == sql
+
+
+def test_repair_feedback_points_at_the_schema_and_the_join() -> None:
+    prompt = build_sql_generation_prompt(
+        question="revenue by category",
+        schema=DEMO_SCHEMA_DESCRIPTION,
+        max_rows=100,
+        feedback='column "category" does not exist',
+    )
+
+    assert 'column "category" does not exist' in prompt
+    assert "A column is available only in the table under which it is listed" in prompt
+    assert "join demo_products" in prompt
 
 
 def test_render_rows_stays_within_the_character_budget() -> None:

@@ -16,6 +16,7 @@ describe tables the seed does not create.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +31,22 @@ from app.database.repositories import DocumentStore
 from app.database.sql_guard import MAX_ROWS_HARD_LIMIT, validate_readonly_sql
 
 MAX_ROWS_CHARS = 8000
+
+_TRAILING_LIMIT = re.compile(r"\s+limit\s+\d+\s*$", re.IGNORECASE)
+
+# "top 3", "3 highest", "first ten", "limit to 5". A question that names a
+# count asked for a bounded result; anything else did not, and a model-invented
+# LIMIT 1 there hides the other groups instead of shortening the answer.
+_REQUESTED_TOP_N = re.compile(
+    r"\b(?:top|first|last|best|worst|highest|lowest|largest|smallest|latest|"
+    r"earliest|bottom|leading)\s+(?:\d+|one|two|three|four|five|six|seven|"
+    r"eight|nine|ten)\b"
+    r"|\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:top|best|worst|highest|lowest|largest|smallest|latest|earliest|leading)\b"
+    r"|\blimit(?:ed)?\s+(?:to\s+)?(?:\d+|one|two|three|four|five|six|seven|"
+    r"eight|nine|ten)\b",
+    re.IGNORECASE,
+)
 
 _LAST_YEAR = DEMO_START_YEAR + (DEMO_MONTHS - 1) // 12
 _LAST_MONTH = (DEMO_MONTHS - 1) % 12 + 1
@@ -57,6 +74,18 @@ def _build_schema_description() -> str:
         "    quantity    integer  units sold\n"
         "    revenue     numeric  quantity * unit_price, in USD\n"
         "\n"
+        "A column exists only in the table under which it is listed. "
+        "demo_sales_orders does not contain category, name, or unit_price. "
+        "To group or filter by those, join demo_products:\n"
+        "    demo_sales_orders AS o JOIN demo_products AS p ON p.id = o.product_id\n"
+        "\n"
+        "Example - revenue by category across the whole dataset:\n"
+        "    SELECT p.category, SUM(o.revenue) AS revenue_usd\n"
+        "    FROM demo_sales_orders AS o\n"
+        "    JOIN demo_products AS p ON p.id = o.product_id\n"
+        "    GROUP BY p.category\n"
+        "    ORDER BY revenue_usd DESC\n"
+        "\n"
         f"Coverage: {DEMO_ORDER_COUNT} orders, {DEMO_MONTHS} consecutive months from "
         f"{DEMO_START_YEAR}-01 to {_LAST_YEAR}-{_LAST_MONTH:02d}.\n"
         "\n"
@@ -64,8 +93,10 @@ def _build_schema_description() -> str:
         "only: count, sum, avg, min, max, round, substr, coalesce, group by, "
         "order by, limit, and common table expressions. Avoid to_char, date_trunc, "
         "strftime, casts to date types, and any other dialect-specific syntax. "
-        "Filter year with substr(order_date, 1, 4) = '2024' and month with "
-        "substr(order_date, 1, 7) = '2024-03'."
+        "Only when the question asks for a period, filter the year with "
+        "substr(order_date, 1, 4) = '2024' or the month with "
+        "substr(order_date, 1, 7) = '2024-03'. Never add a date filter the "
+        "question did not ask for."
     )
 
 
@@ -84,6 +115,26 @@ class AnalyticsResult:
     @property
     def row_count(self) -> int:
         return len(self.rows)
+
+
+def strip_unrequested_limit(sql: str, question: str) -> str:
+    """Remove a trailing LIMIT that the question did not ask for.
+
+    Small models sometimes append ``LIMIT 1`` to a question that asks for a
+    breakdown ("revenue by category"), which returns one group and makes the
+    comparison impossible. The row cap is enforced by the store, not by the
+    generated LIMIT, so dropping an unrequested one widens evidence without
+    weakening a resource bound. A count named in the question ("top 3", "first
+    ten") is left alone.
+
+    Only a trailing top-level LIMIT is considered. A LIMIT inside a subquery or
+    followed by OFFSET is part of the query's own logic and is not touched.
+    """
+    if not _TRAILING_LIMIT.search(sql):
+        return sql
+    if _REQUESTED_TOP_N.search(question):
+        return sql
+    return _TRAILING_LIMIT.sub("", sql)
 
 
 def run_analytics_query(

@@ -36,6 +36,7 @@ from app.tools.analytics import (
     AnalyticsResult,
     render_rows,
     run_analytics_query,
+    strip_unrequested_limit,
 )
 
 logger = get_logger(__name__)
@@ -99,9 +100,15 @@ async def generate_and_run_query(
 
     for attempt in range(1, MAX_QUERY_ATTEMPTS + 1):
         query = await generate_query(model, question=question, max_rows=max_rows, feedback=feedback)
+        statement = strip_unrequested_limit(query.sql, question)
+        if statement != query.sql:
+            logger.info(
+                "analytics_limit_removed",
+                extra=safe_extra(attempt=attempt, question_chars=len(question)),
+            )
         try:
             result = await run_in_threadpool(
-                run_analytics_query, store, sql=query.sql, max_rows=max_rows
+                run_analytics_query, store, sql=statement, max_rows=max_rows
             )
         except AppError as exc:
             if exc.code not in _REPAIRABLE_CODES:
