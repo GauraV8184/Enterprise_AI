@@ -45,6 +45,7 @@ import { GroundedBadge, RouteBadge } from "../components/StatusBadges";
 import { Spinner } from "../components/Spinner";
 import { useAutoResize } from "../hooks/useAutoResize";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { useTransientFlag } from "../hooks/useTransientFlag";
 import { formatNumber, humanizeIntent } from "../lib/format";
 
 const MAX_QUESTION_CHARS = 4000;
@@ -214,6 +215,16 @@ export function WorkflowPage() {
     }
     return counts;
   }, [turns]);
+
+  const lastSuccessId = useMemo(() => {
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      if (turns[index].status === "success") {
+        return turns[index].id;
+      }
+    }
+    return null;
+  }, [turns]);
+  const highlightAnswer = useTransientFlag(pending ? null : lastSuccessId);
 
   const runTurn = useCallback(
     async (
@@ -518,7 +529,13 @@ export function WorkflowPage() {
                   )}
 
                   {turn.status === "success" && turn.response && (
-                    <div className="workflow-answer">
+                    <div
+                      className={`workflow-answer${
+                        highlightAnswer && turn.id === lastSuccessId
+                          ? " answer-highlight"
+                          : ""
+                      }`}
+                    >
                       <IntentChips response={turn.response} />
                       <p className="intent-summary">
                         {turn.response.intent.summary}

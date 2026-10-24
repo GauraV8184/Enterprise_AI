@@ -32,6 +32,7 @@ import { EvidenceSections, ResponseMeta } from "../components/EvidencePanel";
 import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { useTransientFlag } from "../hooks/useTransientFlag";
 import { formatNumber } from "../lib/format";
 
 const MAX_TOPIC_CHARS = 4000;
@@ -105,6 +106,7 @@ export function ReportsPage() {
   const [error, setError] = useState<unknown>(null);
   const abortRef = useRef<AbortController | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
+  const highlightReport = useTransientFlag(busy ? null : result);
 
   useEffect(() => {
     return () => abortRef.current?.abort();
@@ -362,7 +364,11 @@ export function ReportsPage() {
           )}
 
           {result && (
-            <section className="report-output">
+            <section
+              className={`report-output${
+                highlightReport ? " answer-highlight" : ""
+              }`}
+            >
               <div className="report-output-toolbar">
                 <div>
                   <p className="eyebrow">Markdown report</p>

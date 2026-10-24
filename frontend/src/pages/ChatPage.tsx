@@ -34,6 +34,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Spinner } from "../components/Spinner";
 import { useAutoResize } from "../hooks/useAutoResize";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { useTransientFlag } from "../hooks/useTransientFlag";
 import { formatNumber } from "../lib/format";
 
 const MAX_MESSAGES = 50;
@@ -110,6 +111,16 @@ export function ChatPage() {
       ),
     [items],
   );
+
+  const lastAssistantId = useMemo(() => {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (items[index].role === "assistant") {
+        return items[index].id;
+      }
+    }
+    return null;
+  }, [items]);
+  const highlightAnswer = useTransientFlag(pending ? null : lastAssistantId);
 
   const limitReached = items.length >= MAX_MESSAGES;
 
@@ -295,7 +306,13 @@ export function ChatPage() {
                         ? userInitial
                         : <Bot size={18} />}
                     </span>
-                    <div className="message-content">
+                    <div
+                      className={`message-content${
+                        highlightAnswer && item.id === lastAssistantId
+                          ? " answer-highlight"
+                          : ""
+                      }`}
+                    >
                       <div className="message-role">
                         {item.role === "user" ? "You" : "Assistant"}
                         {item.response && (

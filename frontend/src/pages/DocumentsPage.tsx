@@ -45,6 +45,7 @@ import { Markdown } from "../components/Markdown";
 import { PageHeader } from "../components/PageHeader";
 import { Spinner } from "../components/Spinner";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { useTransientFlag } from "../hooks/useTransientFlag";
 import { formatBytes, formatDateTime, formatNumber, formatRelativeTime } from "../lib/format";
 import { UPLOAD_ACCEPT } from "../lib/config";
 import { validateFile } from "../lib/files";
@@ -114,6 +115,9 @@ export function DocumentsPage() {
   const uploadProcessingRef = useRef(false);
   const retrievalAbortRef = useRef<AbortController | null>(null);
   const questionRef = useRef<HTMLTextAreaElement>(null);
+  const highlightAnswer = useTransientFlag(
+    retrievalBusy ? null : askResult,
+  );
 
   const loadDocuments = useCallback(async () => {
     setDocumentsLoading(true);
@@ -817,7 +821,11 @@ export function DocumentsPage() {
             )}
 
             {askResult && (
-              <div className="answer-result">
+              <div
+                className={`answer-result${
+                  highlightAnswer ? " answer-highlight" : ""
+                }`}
+              >
                 <div className="answer-heading">
                   <div>
                     <p className="eyebrow">Grounded answer</p>

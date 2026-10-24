@@ -2355,10 +2355,46 @@ h4 {
   }
 }
 
+/* ---------- Generated answer highlight ----------------------------------- */
+
+/* A one-off cue applied by useTransientFlag when an answer arrives. The flag
+   clears itself, so this never becomes a permanent visual state. */
+.answer-highlight {
+  animation: answer-highlight 2400ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes answer-highlight {
+  0% {
+    box-shadow:
+      0 0 0 1px rgba(108, 235, 213, 0.72),
+      0 0 0 7px rgba(108, 235, 213, 0.1),
+      0 18px 50px rgba(0, 0, 0, 0.2);
+  }
+
+  45% {
+    box-shadow:
+      0 0 0 1px rgba(108, 235, 213, 0.5),
+      0 0 0 4px rgba(108, 235, 213, 0.06),
+      0 18px 50px rgba(0, 0, 0, 0.18);
+  }
+
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(108, 235, 213, 0),
+      0 0 0 0 rgba(108, 235, 213, 0),
+      0 0 0 rgba(0, 0, 0, 0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .stat-card,
   .capability-card,
   .btn {
     transform: none !important;
+  }
+
+  .answer-highlight {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(108, 235, 213, 0.55);
   }
 }
