@@ -37,6 +37,7 @@ from app.database.repositories import (
     DocumentStore,
     new_id,
 )
+from app.llm.service import map_exception
 from app.rag.chunking import chunk_blocks
 from app.rag.loaders import NoExtractableTextError, load_document_from_bytes
 
@@ -133,7 +134,10 @@ def ingest_document(
         if not chunks:
             raise NoExtractableTextError(f"'{filename}' produced no indexable text.")
 
-        vectors = embeddings.embed_documents([chunk.content for chunk in chunks])
+        try:
+            vectors = embeddings.embed_documents([chunk.content for chunk in chunks])
+        except Exception as exc:  # noqa: BLE001 - translated to a typed provider error
+            raise map_exception(exc) from exc
         _validate_embedding_vectors(vectors, expected_count=len(chunks))
 
         repository.add_chunks(

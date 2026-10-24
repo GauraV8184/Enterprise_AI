@@ -15,7 +15,7 @@ from app.core.config import Settings
 from app.main import create_app
 from app.storage.errors import FileStoreUnavailableError
 from tests.conftest import upload
-from tests.fakes import FakeChatModel, HashingEmbeddings
+from tests.fakes import FakeChatModel, HashingEmbeddings, make_connection_error
 from tests.sample_files import (
     LAPTOP_SECURITY_TEXT,
     REVENUE_REPORT_TEXT,
@@ -107,6 +107,29 @@ def test_inconsistent_embedding_dimensions_fail_the_upload_cleanly(
     searched = rag_client.post("/api/documents/search", json={"query": "token"}).json()
     assert searched["matches"] == []
     assert searched["searched_chunks"] == 0
+
+
+def test_unreachable_embedding_provider_is_a_typed_502(
+    rag_client: TestClient, documents_dir: Path
+) -> None:
+    """The upload row stays failed, but the caller gets the real cause."""
+
+    class UnreachableEmbeddings(HashingEmbeddings):
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            raise make_connection_error()
+
+    rag_client.app.state.embeddings = UnreachableEmbeddings()
+
+    response = upload(rag_client, write_text_file(documents_dir))
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["code"] == "llm_connection_failed"
+    assert body["details"]["status"] == "failed"
+
+    created = rag_client.get(f"/api/documents/{body['details']['document_id']}").json()
+    assert created["status"] == "failed"
+    assert created["chunk_count"] == 0
 
 
 def test_uploaded_document_is_listed(rag_client: TestClient, documents_dir: Path) -> None:

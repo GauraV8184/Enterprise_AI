@@ -21,13 +21,14 @@ from app.database.repositories import (
     DocumentRepository,
     new_id,
 )
+from app.llm.errors import LlmConnectionError
 from app.rag.retriever import (
     DEFAULT_MIN_SCORE,
     answer_question,
     format_context,
     search,
 )
-from tests.fakes import FakeChatModel, HashingEmbeddings
+from tests.fakes import FakeChatModel, HashingEmbeddings, make_connection_error
 
 LEAVE_TEXT = (
     "Every full-time employee accrues twenty days of paid annual leave per calendar "
@@ -182,6 +183,17 @@ def test_blank_query_is_rejected(
 ) -> None:
     with pytest.raises(AppError, match="must not be blank"):
         search(repository, embeddings, owner_id=ALICE, query="   ", top_k=3)
+
+
+def test_embedding_outage_is_a_typed_provider_error(repository: DocumentRepository) -> None:
+    """A dead embedding endpoint must not escape as an unhandled 500."""
+
+    class UnreachableEmbeddings(HashingEmbeddings):
+        def embed_query(self, text: str) -> list[float]:
+            raise make_connection_error()
+
+    with pytest.raises(LlmConnectionError):
+        search(repository, UnreachableEmbeddings(), owner_id=ALICE, query="leave", top_k=3)
 
 
 def test_search_delegates_ranking_to_the_store() -> None:

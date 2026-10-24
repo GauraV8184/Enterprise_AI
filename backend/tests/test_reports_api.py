@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from app.llm.schemas import AnalyticsQuery, SearchPlan
 from app.tools.web_search import WebResult
 from tests.conftest import upload
-from tests.fakes import FakeChatModel, FakeWebSearch
+from tests.fakes import FakeChatModel, FakeWebSearch, HashingEmbeddings, make_connection_error
 from tests.sample_files import write_text_file
 
 LEAVE_TOPIC = "How much paid annual leave does a full-time employee accrue?"
@@ -68,6 +68,28 @@ def test_reports_default_to_the_corpus_only(
     assert body["web_sources"] == []
     assert body["analytics"] is None
     assert "No evidence was found" in body["report"]
+    assert fake_model.received == []
+
+
+def test_report_maps_an_embedding_outage_to_a_typed_error(
+    rag_client: TestClient, fake_model: FakeChatModel
+) -> None:
+    """A dead embedding endpoint is a provider error, not an internal error."""
+
+    class UnreachableEmbeddings(HashingEmbeddings):
+        def embed_query(self, text: str) -> list[float]:
+            raise make_connection_error()
+
+    rag_client.app.state.embeddings = UnreachableEmbeddings()
+
+    response = rag_client.post(
+        "/api/reports", json={"topic": LEAVE_TOPIC, "sources": ["documents"]}
+    )
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["code"] == "llm_connection_failed"
+    assert "Could not reach" in body["detail"]
     assert fake_model.received == []
 
 

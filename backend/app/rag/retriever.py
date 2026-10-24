@@ -28,7 +28,7 @@ from app.core.errors import AppError
 from app.core.logging import get_logger, safe_extra
 from app.database.repositories import ChunkMatch, DocumentStore
 from app.llm.prompts import RAG_SYSTEM_PROMPT, build_grounded_answer_prompt
-from app.llm.service import TokenUsage, generate_answer
+from app.llm.service import TokenUsage, generate_answer, map_exception
 
 logger = get_logger(__name__)
 
@@ -140,7 +140,16 @@ def search(
     if not cleaned:
         raise EmptyQueryError()
 
-    query_vector = np.asarray(embeddings.embed_query(cleaned), dtype=np.float32)
+    try:
+        query_vector = np.asarray(embeddings.embed_query(cleaned), dtype=np.float32)
+    except Exception as exc:  # noqa: BLE001 - translated to a typed provider error
+        mapped = map_exception(exc)
+        logger.warning(
+            "retrieval_embedding_failed",
+            extra=safe_extra(error_type=type(exc).__name__, mapped_error=mapped.code),
+        )
+        raise mapped from exc
+
     result = repository.search_chunks(
         owner_id=owner_id,
         query_embedding=query_vector,
