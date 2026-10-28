@@ -203,7 +203,7 @@ Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in `frontend/.env.local`
 to use real Supabase Auth. Leave both blank to use the development `X-User-Id`
 stub while the backend also permits it. Only the public anon key belongs in the
 browser; never put `SUPABASE_SERVICE_ROLE_KEY` or any LLM key there. Full details
-are in [`frontend/README.md`](frontend/README.md).
+are in [`docs/frontend.md`](docs/frontend.md).
 
 ---
 
@@ -469,7 +469,7 @@ npm run build
 ```
 
 Routes are lazy-loaded; `dist/` contains static assets that the frontend Docker
-image serves through nginx. See [`frontend/README.md`](frontend/README.md) for the
+image serves through nginx. See [`docs/frontend.md`](docs/frontend.md) for the
 full setup, auth, layout and design notes.
 
 ---
@@ -1014,8 +1014,10 @@ Responses include `request_id`, which also appears in the logs and in the
 
 ## Documentation
 
-- [`frontend/README.md`](frontend/README.md) — frontend setup, auth modes,
+- [`docs/frontend.md`](docs/frontend.md) — frontend setup, auth modes,
   routes, source layout, checks and limitations.
+- [`docs/supabase.md`](docs/supabase.md) — database schema, migration order,
+  RLS/security model, and verification checks.
 - [`docs/architecture.md`](docs/architecture.md) — components, request flow, and
   the reasoning behind each phase's choices.
 - [`docs/deployment.md`](docs/deployment.md) — Compose, Supabase, Ollama override,

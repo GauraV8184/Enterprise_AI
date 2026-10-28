@@ -441,7 +441,7 @@ def main() -> int:
         print(f"RESULT: credentials work, {len(blockers)} thing(s) still to do:")
         for blocker in blockers:
             print(f"  - {blocker}")
-        print("\n  Apply the SQL in supabase/migrations/ - see supabase/README.md.")
+        print("\n  Apply the SQL in supabase/migrations/ - see docs/supabase.md.")
         return 1
 
     print("RESULT: OK - credentials are valid and the Phase 4 schema is in place.")

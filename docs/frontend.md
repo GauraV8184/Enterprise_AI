@@ -180,5 +180,5 @@ src/
 - The development `X-User-Id` identity is not authentication. Use Supabase Auth
   for anything shared or deployed.
 - Docker packaging and production hosting are covered in the root
-  [`docs/deployment.md`](../docs/deployment.md); the UI itself is still not a
+  [`docs/deployment.md`](deployment.md); the UI itself is still not a
   security boundary.

@@ -14,7 +14,7 @@ production Compose stack.
 ## Prerequisites
 
 - Docker Engine/Desktop 29+ with Compose v2 (`docker compose version`).
-- A Supabase project with the migrations from [`supabase/README.md`](../supabase/README.md)
+- A Supabase project with the migrations described in [`docs/supabase.md`](supabase.md)
   applied, including the `documents` Storage bucket and RLS policies.
 - A root `.env` file. It is git-ignored and is read both by Compose for
   interpolation and by the backend container at runtime.
